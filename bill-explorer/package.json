@@ -1,0 +1,59 @@
+{
+  "name": "bill-explorer",
+  "version": "1.0.0",
+  "private": true,
+  "main": "dist-electron/main.js",
+  "scripts": {
+    "dev": "vite",
+    "build:renderer": "tsc && vite build",
+    "build:main": "esbuild src/main/main.ts --bundle --platform=node --external:electron --format=cjs --outfile=dist-electron/main.js",
+    "build:preload": "esbuild src/main/preload.ts --bundle --platform=node --external:electron --format=cjs --outfile=dist-electron/preload.js",
+    "build:electron": "npm run build:main && npm run build:preload",
+    "build": "npm run build:renderer && npm run build:electron",
+    "electron:watch": "esbuild src/main/main.ts src/main/preload.ts --bundle --platform=node --external:electron --format=cjs --outdir=dist-electron --watch",
+    "preview": "vite preview",
+    "electron:preview": "npm run build && electron .",
+    "electron:build": "npm run build && electron-builder",
+    "electron:build:win": "npm run build && electron-builder --win",
+    "electron:build:mac": "npm run build && electron-builder --mac",
+    "start": "vite --host"
+  },
+  "dependencies": {
+    "electron-store": "^8.2.0",
+    "exceljs": "^4.4.0",
+    "pinyin-pro": "^3.24.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/react": "^18.3.3",
+    "@types/react-dom": "^18.3.2",
+    "@vitejs/plugin-react": "^4.3.1",
+    "electron": "^31.0.0",
+    "electron-builder": "^24.13.3",
+    "esbuild": "^0.21.4",
+    "typescript": "^5.5.4",
+    "vite": "^5.3.4"
+  },
+  "build": {
+    "appId": "com.bill-explorer.app",
+    "productName": "BillExplorer",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": "nsis"
+    },
+    "mac": {
+      "target": "dmg"
+    },
+    "linux": {
+      "target": "AppImage"
+    }
+  }
+}
