@@ -9,13 +9,13 @@ interface ColDef {
   width: number
 }
 const COLUMNS: ColDef[] = [
-  { field: 'no', label: '序号', type: 'text', width: 64 },
-  { field: 'date', label: '日期', type: 'date', width: 104 },
+  { field: 'no', label: '序号', type: 'text', width: 40 },
+  { field: 'date', label: '日期', type: 'date', width: 90 },
   { field: 'name', label: '货品名称', type: 'text', width: 172 },
   { field: 'unit', label: '单位', type: 'text', width: 60 },
-  { field: 'qty', label: '数量', type: 'number', width: 72 },
-  { field: 'price', label: '单价', type: 'number', width: 86 },
-  { field: 'amount', label: '金额', type: 'number', width: 98 },
+  { field: 'qty', label: '数量', type: 'number', width: 56 },
+  { field: 'price', label: '单价', type: 'number', width: 72 },
+  { field: 'amount', label: '金额', type: 'number', width: 84 },
   { field: 'person', label: '调货人', type: 'text', width: 92 },
   { field: 'remark', label: '备注', type: 'text', width: 150 },
 ]
@@ -44,6 +44,23 @@ function fmtNum(n: number): string {
 // 整行是否为空（用于判定录入行）
 function isRowEmpty(row?: string[]): boolean {
   return !row || row.every((c) => !String(c).trim())
+}
+// A3 新行预填：导航到空行时，从上一行带走这些列的默认值（同批录单据常相同的列）。
+// 数量/单价/金额/货品名/序号 不预填（每笔不同）。
+const SEED_FIELDS = new Set(['date', 'person', 'remark'])
+// 真正构成一笔记录的列：用于保存时剥离"只有预填默认值、无实质内容"的空行
+const SUBSTANCE_FIELDS = new Set(['no', 'name', 'qty', 'price', 'amount'])
+function rowHasSubstance(row?: string[]): boolean {
+  if (!row) return false
+  return COLUMNS.some(
+    (col, i) => SUBSTANCE_FIELDS.has(col.field) && String(row[i] ?? '').trim() !== '',
+  )
+}
+// 从上一行构造"预填默认值行"（只填 SEED_FIELDS 列）
+function buildSeedRow(src?: string[]): string[] {
+  const row = emptyRow()
+  if (src) COLUMNS.forEach((col, i) => { if (SEED_FIELDS.has(col.field)) row[i] = String(src[i] ?? '') })
+  return row
 }
 // 把各种来源的日期文本规范化成 yyyy-mm-dd（无法识别则返回空串）
 // 支持：2026-8-11 / 2026/8/11 / 2026.8.11 / 20260811 / 2026年8月11日 / 8-11（补当年）/ Excel 日期序列号
@@ -121,6 +138,16 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
   const [menu, setMenu] = useState<{ x: number; y: number; r: number; c: number } | null>(null)
   // 仅用于让菜单里的撤销/重做项能正确禁用
   const [histLen, setHistLen] = useState({ undo: 0, redo: 0 })
+  // A1 记忆式自动补全：编辑文本列时，按前缀匹配本表同列历史值的下拉建议
+  const [suggest, setSuggest] = useState<{
+    r: number
+    c: number
+    items: string[]
+    hi: number
+    rect: { left: number; top: number; width: number } | null
+  } | null>(null)
+  // A5 文件导入
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   const containerRef = useRef<HTMLDivElement>(null)
   const editRef = useRef<HTMLTextAreaElement | HTMLInputElement | null>(null)
@@ -155,6 +182,9 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
   const lastCommitKeyRef = useRef<string | null>(null)
   // 自己复制过的文本，作为读不到系统剪贴板时的兜底
   const lastCopyRef = useRef('')
+  // A3 新行预填：行号 → 从上一行带过来的默认值行（只在"首次录入该行"时合并进 grid，
+  // 之后即清除，因此不会污染、也不会被保存成空行）。键为行号。
+  const rowDefaultsRef = useRef<Map<number, string[]>>(new Map())
 
   /* ===================== 撤销 / 重做 ===================== */
   const MAX_UNDO = 200
@@ -331,6 +361,14 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
     setGrid((prev) => {
       const next = prev.map((row) => row.slice())
       if (!next[r]) next[r] = emptyRow()
+      // A3 新行预填：首次在该空行录入时，把"从上一行带过来的默认值"合并进来（只此一次）
+      if (rowDefaultsRef.current.has(r) && isRowEmpty(next[r])) {
+        const seed = rowDefaultsRef.current.get(r)!
+        COLUMNS.forEach((col, i) => {
+          if (SEED_FIELDS.has(col.field) && seed[i]) next[r][i] = seed[i]
+        })
+        rowDefaultsRef.current.delete(r)
+      }
       next[r][c] = value
       const f = COLUMNS[c].field
       // 数量/单价变化时自动重算金额（两者都有值时）
@@ -476,6 +514,15 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
     })
   }, [])
 
+  // A3 新行预填：落到一个全新的空行时，从上一行带走 SEED_FIELDS 列的默认值，
+  // 暂存进 rowDefaultsRef（不写 grid）。真正录入该行时再由 commitCell 合并一次。
+  const maybeSeed = useCallback((nr: number) => {
+    if (nr <= 0) return
+    if (rowDefaultsRef.current.has(nr)) return
+    if (!isRowEmpty(gridRef.current[nr])) return
+    rowDefaultsRef.current.set(nr, buildSeedRow(gridRef.current[nr - 1]))
+  }, [])
+
   // 编辑态内导航：Enter=下、Tab=右(末列换行)、Shift+Tab=左、Esc=退出编辑
   const moveEdit = useCallback((dir: 'down' | 'up' | 'right' | 'left') => {
     const { r, c } = activeRef.current
@@ -498,10 +545,11 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
     }
     if (nr < 0) nr = 0
     if (nr >= gridRef.current.length) appendRowsIfNeeded(nr)
+    maybeSeed(nr)
     setActive({ r: nr, c: nc })
     if (isRowEmpty(gridRef.current[nr])) setInputRow(nr)
     setEditing(true)
-  }, [appendRowsIfNeeded])
+  }, [appendRowsIfNeeded, maybeSeed])
 
   // 非编辑态导航
   const nav = useCallback((dr: number, dc: number) => {
@@ -513,11 +561,12 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
     if (nc < 0) nc = 0
     if (nc >= COL_COUNT) nc = COL_COUNT - 1
     if (nr >= gridRef.current.length) appendRowsIfNeeded(nr)
+    maybeSeed(nr)
     setActive({ r: nr, c: nc })
     if (isRowEmpty(gridRef.current[nr])) setInputRow(nr)
     setEditing(false)
     focusContainer()
-  }, [appendRowsIfNeeded])
+  }, [appendRowsIfNeeded, maybeSeed])
 
   /* ===================== 复制 / 粘贴 ===================== */
   const pasteTSV = useCallback((text: string, start: { r: number; c: number }) => {
@@ -569,6 +618,156 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
     pasteTSV(text, { r, c })
     setStatus('已粘贴')
   }, [pasteTSV])
+
+  /* ===================== A1 记忆式自动补全 ===================== */
+  // 接受某个建议值：写入该格；moveDir 指定接受后移动到哪个方向继续录入
+  const acceptSuggest = useCallback(
+    (r: number, c: number, value: string, moveDir?: 'down' | 'right' | 'left') => {
+      commitCell(r, c, value)
+      setSuggest(null)
+      if (moveDir) moveEdit(moveDir)
+    },
+    [commitCell, moveEdit],
+  )
+
+  // A1 记忆式补全：根据当前文本，收集同列（除本行外）的历史值给出前缀匹配建议；
+  // 文本为空时展示最近用过的若干值。建议框定位到编辑器下方（视口坐标）。
+  const updateSuggest = useCallback((r: number, c: number, value: string) => {
+    if (COLUMNS[c].type !== 'text') {
+      setSuggest(null)
+      return
+    }
+    const cur = String(value).trim()
+    const seen = new Set<string>()
+    const hist: string[] = []
+    // 从下往上收集，越近录入的越优先
+    for (let i = gridRef.current.length - 1; i >= 0; i -= 1) {
+      if (i === r) continue
+      const v = String(gridRef.current[i]?.[c] ?? '').trim()
+      if (!v || seen.has(v)) continue
+      seen.add(v)
+      hist.push(v)
+    }
+    const items = cur === ''
+      ? hist.slice(0, 8)
+      : hist.filter((h) => h.toLowerCase().startsWith(cur.toLowerCase())).slice(0, 8)
+    if (items.length === 0) {
+      setSuggest(null)
+      return
+    }
+    const el = editRef.current
+    const rect = el ? el.getBoundingClientRect() : null
+    setSuggest({
+      r,
+      c,
+      items,
+      hi: 0,
+      rect: rect ? { left: rect.left, top: rect.bottom, width: rect.width } : null,
+    })
+  }, [])
+
+  // A1：进入文本列编辑态时，按已输入内容给出同列历史补全建议（换格/进入即刷新）
+  useEffect(() => {
+    if (!editing) {
+      setSuggest(null)
+      return
+    }
+    const { r, c } = active
+    if (COLUMNS[c].type !== 'text') {
+      setSuggest(null)
+      return
+    }
+    updateSuggest(r, c, gridRef.current[r]?.[c] || '')
+  }, [editing, active.r, active.c, updateSuggest])
+
+  /* ===================== A2 复制上一行 ===================== */
+  // Ctrl+D：把上一行整行复制到当前行（若已选多行，则各自从自己的上一行复制）
+  const fillFromAbove = useCallback(
+    (r: number) => {
+      const sel = selRowsRef.current
+      const targets = sel.size > 0 ? Array.from(sel).sort((a, b) => a - b) : [r]
+      if (targets[0] <= 0) {
+        setStatus('已在首行，没有上一行可复制')
+        return
+      }
+      const base = gridRef.current
+      pushUndo()
+      lastCommitKeyRef.current = null
+      setGrid((prev) => {
+        const next = prev.map((row) => row.slice())
+        for (const tr of targets) {
+          if (tr <= 0) continue
+          const src = base[tr - 1]
+          if (src) next[tr] = src.slice()
+        }
+        return next
+      })
+      setDirty(true)
+      setStatus(`已复制上一行到 ${targets.length} 行`)
+      focusContainer()
+    },
+    [pushUndo],
+  )
+
+  // 右键"复制此行到下方"：在选中行正下方各插入一份副本
+  const duplicateRowsBelow = useCallback(
+    (rowsIdx: number[]) => {
+      const sorted = rowsIdx.slice().sort((a, b) => a - b)
+      if (sorted.length === 0) return
+      pushUndo()
+      lastCommitKeyRef.current = null
+      setGrid((prev) => {
+        const next = prev.map((row) => row.slice())
+        // 从下往上插，避免索引错位
+        for (let k = sorted.length - 1; k >= 0; k -= 1) {
+          const srcIdx = sorted[k]
+          const copy = (next[srcIdx] || emptyRow()).slice()
+          next.splice(srcIdx + 1, 0, copy)
+        }
+        return next
+      })
+      rowDefaultsRef.current.clear()
+      setDirty(true)
+      const firstNew = sorted[0] + 1
+      setActive({ r: firstNew, c: 0 })
+      setInputRow(firstNew)
+      setEditing(true)
+      setStatus(`已复制 ${sorted.length} 行到下方`)
+    },
+    [pushUndo],
+  )
+
+  /* ===================== A5 文件导入 ===================== */
+  const handleImportFile = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const f = e.target.files && e.target.files[0]
+      if (!f) return
+      const reader = new FileReader()
+      reader.onload = () => {
+        const text = String(reader.result || '')
+        const lines = text.replace(/\r/g, '').split('\n')
+        while (lines.length && lines[lines.length - 1].trim() === '') lines.pop()
+        if (lines.length === 0) {
+          setStatus('文件为空')
+          return
+        }
+        // 含制表符按 TSV 解析，否则按 CSV（简单去引号）解析
+        const matrix = lines.map((ln) =>
+          ln.includes('\t')
+            ? ln.split('\t')
+            : ln.split(',').map((s) => s.replace(/^"|"$/g, '')),
+        )
+        const tsv = matrix.map((rr) => rr.join('\t')).join('\n')
+        // 追加到现有数据末尾
+        pasteTSV(tsv, { r: gridRef.current.length, c: 0 })
+        setStatus(`已导入 ${matrix.length} 行（含表头请自行删除）`)
+      }
+      reader.onerror = () => setStatus('文件读取失败')
+      reader.readAsText(f)
+      e.target.value = '' // 允许重复导入同一文件
+    },
+    [pasteTSV],
+  )
 
   /* ===================== 行选择（点行号） ===================== */
   const rowAnchorRef = useRef(0) // Shift 范围选的锚点
@@ -644,6 +843,7 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
 
   /* ===================== 键盘（容器层，非编辑态） ===================== */
   const onContainerKey = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
+    const { r, c } = activeRef.current
     // 编辑态：只放行 Ctrl/Cmd+S 保存与撤销/重做，其余交给单元格内编辑器
     // （单元格是受控组件，浏览器原生的输入框撤销本就失效，统一走网格自己的撤销栈）
     if (editingRef.current) {
@@ -659,11 +859,13 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
         } else if (k === 'y') {
           e.preventDefault()
           redo()
+        } else if (k === 'd') {
+          e.preventDefault()
+          fillFromAbove(r)
         }
       }
       return
     }
-    const { r, c } = activeRef.current
     switch (e.key) {
       case 'ArrowDown': e.preventDefault(); nav(1, 0); break
       case 'ArrowUp': e.preventDefault(); nav(-1, 0); break
@@ -700,6 +902,10 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
             // Excel 的删除行快捷键 Ctrl+-
             e.preventDefault()
             deleteRows(selRowsRef.current.size > 0 ? Array.from(selRowsRef.current) : [r])
+          } else if (k === 'd') {
+            // Excel 的"向下填充"：把上一行整行复制到当前行
+            e.preventDefault()
+            fillFromAbove(r)
           }
           // c/v 由原生 copy/paste 事件处理
           return
@@ -766,9 +972,9 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
     setSaving(true)
     setStatus('')
     try {
-      // 先去掉尾部全空行再写回
+      // 先去掉尾部无实质内容的行（全空、或只有"预填默认值"但没录任何有效字段的行）
       const rows = gridRef.current.slice()
-      while (rows.length && rows[rows.length - 1].every((c) => !String(c).trim())) {
+      while (rows.length && !rowHasSubstance(rows[rows.length - 1])) {
         rows.pop()
       }
       const res = await api.saveSheet(file.filePath, rows)
@@ -833,7 +1039,7 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
     const common = {
       ref: editRef as React.Ref<HTMLTextAreaElement & HTMLInputElement>,
       className: 'cell-editor',
-      style: { width: colWidths[c] - 2 },
+      style: { width: '100%' },
       onKeyDown: (e: React.KeyboardEvent) => {
         if (e.key === 'Enter' && !e.shiftKey) {
           e.preventDefault()
@@ -868,12 +1074,12 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
         }, 400)
       }
       return (
-        <div className="date-edit" style={{ width: colWidths[c] - 2 }}>
+        <div className="date-edit" style={{ width: '100%' }}>
           <input
             {...common}
             type="text"
             className="cell-editor cell-editor-datetext"
-            style={{ width: colWidths[c] - 26 }}
+            style={{ flex: 1, minWidth: 0 }}
             value={val}
             onChange={(e) => commitCell(r, c, e.target.value)}
             onKeyDown={(e) => {
@@ -934,7 +1140,44 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
         {...common}
         rows={rows}
         value={val}
-        onChange={(e) => commitCell(r, c, e.target.value)}
+        onChange={(e) => {
+          commitCell(r, c, e.target.value)
+          updateSuggest(r, c, e.target.value)
+        }}
+        onKeyDown={(e) => {
+          // 建议框打开时，方向键/回车/Tab/Esc 优先操作建议，而非移动光标
+          if (suggest && suggest.r === r && suggest.c === c && suggest.items.length > 0) {
+            if (e.key === 'ArrowDown') {
+              e.preventDefault()
+              setSuggest({ ...suggest, hi: (suggest.hi + 1) % suggest.items.length })
+              return
+            }
+            if (e.key === 'ArrowUp') {
+              e.preventDefault()
+              setSuggest({
+                ...suggest,
+                hi: (suggest.hi - 1 + suggest.items.length) % suggest.items.length,
+              })
+              return
+            }
+            if (e.key === 'Enter' && !e.shiftKey) {
+              e.preventDefault()
+              acceptSuggest(r, c, suggest.items[suggest.hi], 'down')
+              return
+            }
+            if (e.key === 'Tab') {
+              e.preventDefault()
+              acceptSuggest(r, c, suggest.items[suggest.hi], e.shiftKey ? 'left' : 'right')
+              return
+            }
+            if (e.key === 'Escape') {
+              e.preventDefault()
+              setSuggest(null)
+              return
+            }
+          }
+          common.onKeyDown(e)
+        }}
       />
     )
   }
@@ -960,6 +1203,13 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
             title="撤销上一步（Ctrl+Z）"
           >
             撤销
+          </button>
+          <button
+            className="btn btn-outline"
+            onClick={() => fileInputRef.current?.click()}
+            title="导入 .csv/.tsv/.txt（追加到末尾，含表头请自行删除）"
+          >
+            导入
           </button>
           <button
             className="btn btn-outline"
@@ -1014,7 +1264,9 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
               <tr
                 key={r}
                 className={
-                  (r === entryRow ? 'entry-row' : '') + (selRows.has(r) ? ' row-selected' : '')
+                  (r === entryRow ? 'entry-row' : '') +
+                  (r === active.r ? ' row-active' : '') +
+                  (selRows.has(r) ? ' row-selected' : '')
                 }
               >
                 <td
@@ -1046,7 +1298,7 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
                   return (
                     <td
                       key={c}
-                      className={isActive ? 'td-active' : ''}
+                      className={isActive ? 'td-active' : c === active.c ? 'col-active' : ''}
                       ref={isActive ? activeTdRef : undefined}
                       onContextMenu={(e) => openMenu(e, r, c)}
                     >
@@ -1055,7 +1307,7 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
                       ) : (
                         <div
                           className={cls}
-                          title={isCopySrc ? '点一下复制到剪贴板，再到目标格 Ctrl+V（双击可就地修改）' : undefined}
+                          title={isCopySrc ? '点一下复制到剪贴板，再到目标格 Ctrl+V（双击可就地修改）' : (val ? val : undefined)}
                           onClick={() => handleCellClick(r, c)}
                           onDoubleClick={() => {
                             // 双击就地编辑；日期列同时弹出日历，便于改旧日期
@@ -1074,6 +1326,32 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
           </tbody>
         </table>
       </div>
+
+      {suggest && suggest.rect && (
+        <ul
+          className="suggest-menu"
+          style={{
+            position: 'fixed',
+            left: suggest.rect.left,
+            top: suggest.rect.top,
+            width: Math.max(suggest.rect.width, 120),
+          }}
+        >
+          {suggest.items.map((it, i) => (
+            <li
+              key={it + '|' + i}
+              className={'suggest-item' + (i === suggest.hi ? ' suggest-hi' : '')}
+              onMouseEnter={() => setSuggest((s) => (s ? { ...s, hi: i } : s))}
+              onMouseDown={(e) => {
+                e.preventDefault() // 别让文本框失焦
+                acceptSuggest(suggest.r, suggest.c, it)
+              }}
+            >
+              {it}
+            </li>
+          ))}
+        </ul>
+      )}
 
       {menu && (() => {
         const rows = menuRows(menu.r)
@@ -1118,6 +1396,7 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
             <div className="ctx-sep" />
             {item('上方插入行', '', () => insertRows(menu.r, rows.length))}
             {item('下方插入行', '', () => insertRows(menu.r + 1, rows.length))}
+            {item(many ? '复制选中行到下方' : '复制此行到下方', 'Ctrl+D', () => duplicateRowsBelow(rows))}
             {item(many ? `删除选中的 ${rows.length} 行` : '删除本行', 'Ctrl+-', () => deleteRows(rows))}
             <div className="ctx-sep" />
             {item('撤销', 'Ctrl+Z', () => undo(), histLen.undo === 0)}
@@ -1132,6 +1411,9 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
           点已有内容的格 → 复制到剪贴板，到目标格 Ctrl+V 粘贴 ·
           日期格点一下即可 Ctrl+V 粘贴或直接打字（2026/8/11、8-11 等格式自动转换），
           要日历点格内 <b>日历按钮</b> 或双击（Alt+↓）·
+          文本列输入时按前缀弹出同列历史补全（↑↓ 选择 · Enter/Tab 确认 · Esc 关闭）·
+          <b>Ctrl+D</b> 复制上一行（右键"复制此行到下方"亦可直接加副本）·
+          <b>导入</b> 按钮可把 .csv/.tsv/.txt 追加到末尾 ·
           点左侧行号选整行（Ctrl/Shift 多选）· 右键菜单可删除/插入行 ·
           Ctrl+Z 撤销 · ↑↓←→ 移动 · Enter 下行 · Tab 右移 · Ctrl+S 保存
         </span>
@@ -1141,6 +1423,14 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
           </span>
         )}
       </div>
+
+      <input
+        ref={fileInputRef}
+        type="file"
+        accept=".csv,.tsv,.txt"
+        style={{ display: 'none' }}
+        onChange={handleImportFile}
+      />
     </div>
   )
 }

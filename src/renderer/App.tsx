@@ -55,6 +55,10 @@ function AppInner({ api }: { api: ElectronAPI }) {
   // ---- 最近修改历史 ----
   const [history, setHistory] = useState<HistoryRecord[]>([])
 
+  // ---- 左侧查找区宽度（px），可拖动中间分隔条调整（参照"最近修改"窗口的可调设计） ----
+  const [sideWidth, setSideWidth] = useState(320)
+  const splitDragRef = useRef<{ startX: number; startW: number } | null>(null)
+
   const searchRef = useRef<HTMLInputElement>(null)
   // 记录最近一次保存的文件路径（用于"同一文件连续编辑 → 覆盖更新"）
   const lastSavedFile = useRef<string | null>(null)
@@ -207,6 +211,27 @@ function AppInner({ api }: { api: ElectronAPI }) {
     }
   }
 
+  // ---- 拖动中间分隔条，左右调节查找区宽度 ----
+  function onSplitterDown(e: React.MouseEvent) {
+    e.preventDefault()
+    e.stopPropagation()
+    splitDragRef.current = { startX: e.clientX, startW: sideWidth }
+    const onMove = (ev: MouseEvent) => {
+      const d = splitDragRef.current
+      if (!d) return
+      // 鼠标向右拉使左侧更宽，向左拉使其更窄；限制在合理范围内
+      const w = Math.max(200, Math.min(window.innerWidth * 0.7, d.startW + (ev.clientX - d.startX)))
+      setSideWidth(w)
+    }
+    const onUp = () => {
+      splitDragRef.current = null
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+  }
+
   // ---- 保存：把面板内的多行数据一次性写回 Excel ----
   // 若与上次保存的是同一个文件（未切换其他 Excel），则覆盖更新上次写入的行，否则追加新记录
   async function onSaveMemo(rows: Array<{
@@ -271,7 +296,7 @@ function AppInner({ api }: { api: ElectronAPI }) {
       </div>
 
       <div className="app-body">
-        <aside className="app-side">
+        <aside className="app-side" style={{ width: sideWidth }}>
           <input
             ref={searchRef}
             className="search-input"
@@ -298,6 +323,8 @@ function AppInner({ api }: { api: ElectronAPI }) {
             onClear={onClearHistory}
           />
         </aside>
+
+        <div className="pane-splitter" onMouseDown={onSplitterDown} title="拖动调整左右宽度" />
 
         <main className="app-main">
           {activeFile ? (

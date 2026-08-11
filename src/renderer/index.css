@@ -88,6 +88,7 @@ body {
 
 .app-side {
   width: 320px;
+  flex: 0 0 auto;
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -103,6 +104,20 @@ body {
   display: flex;
   flex-direction: column;
   min-height: 0;
+}
+
+/* 左右分隔条：拖动调节查找区宽度（参照"最近修改"窗口的上下把手设计） */
+.pane-splitter {
+  flex: 0 0 auto;
+  width: 6px;
+  margin: 0 -3px;
+  cursor: col-resize;
+  background: linear-gradient(90deg, transparent 40%, #c0c4cc 40%, #c0c4cc 60%, transparent 60%);
+  border-radius: 3px;
+  transition: background 0.12s;
+}
+.pane-splitter:hover {
+  background: linear-gradient(90deg, transparent 35%, #409eff 35%, #409eff 65%, transparent 65%);
 }
 
 /* ---- 搜索框 ---- */
@@ -708,7 +723,7 @@ body {
   color: #222;
 }
 
-/* 表头：吸顶 */
+/* 表头：吸顶固定（垂直滚动时始终显示在顶部） */
 .sheet-table thead th {
   position: sticky;
   top: 0;
@@ -723,10 +738,10 @@ body {
   line-height: 24px;
   white-space: nowrap;
   border: 1px solid #b0b0b0;
+  /* border-collapse 下吸顶时底边框会随表格网格滚走，用内阴影补一条始终跟随的分隔线 */
+  border-bottom: 0;
+  box-shadow: inset 0 -1px 0 #b0b0b0;
   user-select: none;
-}
-.sheet-table thead th {
-  position: relative;
 }
 
 /* 行号列 */
@@ -761,6 +776,41 @@ body {
   position: relative;
   z-index: 2;
 }
+/* A4 十字高亮：当前行/列淡蓝底，便于定位光标（优先级低于 entry-row / row-selected） */
+.row-active td {
+  background: rgba(64, 158, 255, 0.06);
+}
+.col-active {
+  background: rgba(64, 158, 255, 0.06);
+}
+/* A1 记忆补全下拉建议 */
+.suggest-menu {
+  position: fixed;
+  z-index: 200;
+  margin: 0;
+  padding: 2px;
+  list-style: none;
+  background: #fff;
+  border: 1px solid #dcdfe6;
+  border-radius: 4px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.14);
+  font-size: 12px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+.suggest-item {
+  padding: 3px 8px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-radius: 3px;
+}
+.suggest-item.suggest-hi,
+.suggest-item:hover {
+  background: #e8f0fe;
+  color: #1a73e8;
+}
 .entry-row td {
   background: #f0fff4;
 }
@@ -768,14 +818,15 @@ body {
   color: #2c8a4a;
 }
 
-/* 单元格内容：保留换行、显示全部内容、自动撑高 */
+/* 单元格内容：单行显示，超出用省略号，避免列被撑高换行（悬停看完整内容） */
 .cell {
   padding: 2px 4px;
   min-height: 22px;
   line-height: 1.4;
-  white-space: pre-wrap;
-  word-break: break-word;
-  overflow-wrap: break-word;
+  height: 22px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   cursor: cell;
 }
 .cell-num {
