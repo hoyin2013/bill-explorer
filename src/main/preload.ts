@@ -22,6 +22,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   updateMemo: (filePath: string, rows: Array<{
     no: string; date: string; name: string; unit: string; qty: number; price: number; amount: number | ''; person: string; remark: string
   }>) => ipcRenderer.invoke('update-memo', { filePath, rows }),
+  // 读取整张表（全量）
+  loadSheet: (filePath: string) => ipcRenderer.invoke('load-sheet', filePath),
+  // 覆盖保存整张表
+  saveSheet: (filePath: string, rows: string[][]) => ipcRenderer.invoke('save-sheet', { filePath, rows }),
   // 获取最近修改历史
   getHistory: () => ipcRenderer.invoke('get-history'),
   // 清空最近修改历史

@@ -2,7 +2,7 @@ import { app, BrowserWindow, ipcMain, dialog } from 'electron'
 import Store from 'electron-store'
 import { join, basename } from 'path'
 import { scanDirectory, openFile } from './file-service'
-import { appendRows, previewRows, updateRows } from './excel-memo'
+import { appendRows, previewRows, updateRows, loadSheet, saveSheet } from './excel-memo'
 
 // 最近修改历史的单条记录
 interface HistoryRecord {
@@ -206,6 +206,37 @@ ipcMain.handle(
       return {
         error: true,
         message: err instanceof Error ? err.message : '更新失败',
+      }
+    }
+  },
+)
+
+// ============ IPC 通道：读取整张表（类 Excel 网格编辑：全量加载） ============
+ipcMain.handle('load-sheet', async (_event, filePath: string) => {
+  try {
+    return await loadSheet(filePath)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : '读取失败'
+    return { error: true, message }
+  }
+})
+
+// ============ IPC 通道：覆盖保存整张表（保存 = 更新，而非追加） ============
+ipcMain.handle(
+  'save-sheet',
+  async (_event, payload: { filePath: string; rows: string[][] }) => {
+    const { filePath, rows } = payload
+    if (!filePath) {
+      return { error: true, message: '文件路径不能为空。' }
+    }
+    try {
+      const result = await saveSheet(filePath, rows)
+      if (!result.error) afterWrite(filePath, result)
+      return result
+    } catch (err) {
+      return {
+        error: true,
+        message: err instanceof Error ? err.message : '保存失败',
       }
     }
   },

@@ -58,6 +58,21 @@ export interface ElectronAPI {
   }>
   getHistory: () => Promise<HistoryRecord[]>
   clearHistory: () => Promise<void>
+  // 读取整张表（全量，字符串矩阵）
+  loadSheet: (filePath: string) => Promise<{
+    error?: boolean
+    message?: string
+    sheetName?: string
+    headerLabels: string[]
+    rows: string[][]
+  }>
+  // 覆盖保存整张表
+  saveSheet: (filePath: string, rows: string[][]) => Promise<{
+    error?: boolean
+    message?: string
+    rowNumber?: number
+    count?: number
+  }>
 }
 
 export interface FileEntry {

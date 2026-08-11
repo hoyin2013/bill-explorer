@@ -674,3 +674,298 @@ body {
   margin-top: 2px;
 }
 
+/* ============ 类 Excel 整表网格编辑器 ============ */
+.sheet-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 10px 14px;
+  gap: 8px;
+}
+
+/* 滚动容器：获得焦点时显示蓝色边框，提示可键盘操作 */
+.sheet-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  outline: none;
+  border: 1px solid #e4e7ed;
+  border-radius: 6px;
+  background: #fff;
+}
+.sheet-scroll:focus {
+  border-color: #409eff;
+  box-shadow: 0 0 0 2px rgba(64, 158, 255, 0.12);
+}
+
+.sheet-table {
+  border-collapse: collapse;
+  table-layout: fixed;
+  width: max-content;
+  min-width: 100%;
+  font-size: 12px;
+  color: #222;
+}
+
+/* 表头：吸顶 */
+.sheet-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: #f2f2f2;
+  color: #222;
+  font-weight: 600;
+  font-size: 12px;
+  text-align: center;
+  padding: 0 4px;
+  height: 24px;
+  line-height: 24px;
+  white-space: nowrap;
+  border: 1px solid #b0b0b0;
+  user-select: none;
+}
+.sheet-table thead th {
+  position: relative;
+}
+
+/* 行号列 */
+.rownum-h {
+  width: 36px;
+  min-width: 36px;
+}
+.rownum {
+  width: 36px;
+  min-width: 36px;
+  text-align: center;
+  color: #888;
+  font-size: 11px;
+  background: #f7f8fa;
+  border: 1px solid #d8dce0;
+  user-select: none;
+}
+
+/* 单元格 */
+.sheet-table td {
+  border: 1px solid #d8dce0;
+  padding: 0;
+  vertical-align: top;
+  background: #fff;
+}
+.sheet-table tbody tr:hover td {
+  background: #f5f9ff;
+}
+/* 当前激活单元格高亮（Excel 蓝框） */
+.td-active {
+  box-shadow: inset 0 0 0 2px #409eff;
+  position: relative;
+  z-index: 2;
+}
+.entry-row td {
+  background: #f0fff4;
+}
+.entry-row .cell {
+  color: #2c8a4a;
+}
+
+/* 单元格内容：保留换行、显示全部内容、自动撑高 */
+.cell {
+  padding: 2px 4px;
+  min-height: 22px;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: break-word;
+  cursor: cell;
+}
+.cell-num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 已有内容的单元格：单击即复制到当前录入行，给出复制光标与悬停提示 */
+.cell-copy-src {
+  cursor: copy;
+}
+.cell-copy-src:hover {
+  background: #e8f3ff;
+  box-shadow: inset 0 0 0 1px #a3cfff;
+}
+
+/* 编辑控件：填满单元格 */
+.cell-editor {
+  display: block;
+  width: 100%;
+  min-height: 22px;
+  margin: 0;
+  padding: 2px 4px;
+  font-size: 12px;
+  font-family: inherit;
+  color: #222;
+  border: none;
+  outline: none;
+  background: #fff;
+  resize: none;
+  line-height: 1.4;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+/* 日期格编辑器：普通文本框 + 右侧日历按钮。
+   用 text 而非 <input type="date">，好处是光标为 I 形、Ctrl+V 原生可用、
+   且不会出现 Chromium 强制渲染的 "年/月/日" 占位。 */
+.date-edit {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  height: 22px;
+  background: #fff;
+  box-sizing: border-box;
+}
+.cell-editor-datetext {
+  height: 22px;
+  cursor: text;
+}
+/* 仅用于 JS 调 showPicker() 弹原生日历。
+   用 opacity:0 而非 display:none —— 后者会让 showPicker 抛 InvalidStateError。 */
+.date-pick-native {
+  position: absolute;
+  right: 0;
+  top: 0;
+  width: 20px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  opacity: 0;
+  pointer-events: none;
+}
+.date-pick-btn {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  color: #606266;
+  background: #f2f3f5;
+  border: 1px solid #dcdfe6;
+  border-radius: 3px;
+  cursor: pointer;
+}
+.date-pick-btn:hover {
+  color: #1a73e8;
+  background: #e8f0fe;
+  border-color: #a8c7fa;
+}
+
+/* 底部信息栏 */
+.sheet-footer {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-top: 6px;
+  border-top: 1px solid #ebeef5;
+  flex-wrap: wrap;
+}
+.sheet-meta {
+  font-size: 12px;
+  color: #606266;
+  white-space: nowrap;
+}
+.sheet-meta b {
+  color: #c0392b;
+  font-size: 13px;
+}
+
+/* 未保存标记 */
+.dirty-dot {
+  color: #e6a23c;
+  font-size: 12px;
+  margin-left: 6px;
+}
+
+/* 行号列可点选整行 */
+.rownum {
+  cursor: pointer;
+}
+.rownum:hover {
+  background: #e8eaed;
+  color: #333;
+}
+/* 选中的整行（点行号选中，用于删除/清空） */
+.row-selected td {
+  background: #dbeafe;
+}
+.row-selected .rownum {
+  background: #93c5fd;
+  color: #1e3a5f;
+  font-weight: 600;
+}
+.sheet-table tbody tr.row-selected:hover td {
+  background: #cfe3fd;
+}
+
+/* 右键菜单 */
+.ctx-menu {
+  position: fixed;
+  z-index: 100;
+  min-width: 182px;
+  padding: 4px;
+  background: #fff;
+  border: 1px solid #dcdfe6;
+  border-radius: 6px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.14);
+  user-select: none;
+}
+.ctx-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+  padding: 6px 10px;
+  font-size: 12px;
+  color: #303133;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+}
+.ctx-item:hover:not(:disabled) {
+  background: #ecf5ff;
+  color: #409eff;
+}
+.ctx-item:disabled {
+  color: #c0c4cc;
+  cursor: not-allowed;
+}
+.ctx-hint {
+  font-size: 11px;
+  color: #a8abb2;
+}
+.ctx-item:disabled .ctx-hint {
+  color: #dcdfe6;
+}
+.ctx-sep {
+  height: 1px;
+  margin: 4px 6px;
+  background: #ebeef5;
+}
+
+/* 列宽拖拽手柄（表头内） */
+.col-resize-handle {
+  position: absolute;
+  top: 0;
+  right: -2px;
+  width: 5px;
+  height: 100%;
+  cursor: col-resize;
+  background: transparent;
+  z-index: 4;
+}
+.col-resize-handle:hover {
+  background: #409eff;
+}
+

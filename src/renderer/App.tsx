@@ -3,7 +3,7 @@ import { ElectronAPI, FileEntry, HistoryRecord } from './types'
 import { filterFiles } from './utils'
 import { DirectoryBar } from './components/DirectoryBar'
 import { ResultList } from './components/ResultList'
-import { MemoPanel } from './components/MemoPanel'
+import { SheetGrid } from './components/SheetGrid'
 import { ErrorMessage } from './components/ErrorMessage'
 import { HistoryList } from './components/HistoryList'
 
@@ -301,25 +301,23 @@ function AppInner({ api }: { api: ElectronAPI }) {
 
         <main className="app-main">
           {activeFile ? (
-            <MemoPanel
+            <SheetGrid
               key={activeFile.filePath}
               file={activeFile}
               api={api}
-              saving={memoSaving}
-              status={memoStatus}
-              onSave={onSaveMemo}
-              onSaveAndNext={onSaveAndNext}
               onClose={onCloseMemo}
+              onSaved={refreshHistory}
             />
           ) : (
             <div className="idle-hint">
               <div className="idle-title">左侧选中文件，开始录入</div>
               <ul className="idle-list">
-                <li><b>←→↑↓</b>　方向键切换焦点</li>
-                <li><b>Enter</b>　向右移动，到行尾 / 最后一行自动换到下一行起始</li>
-                <li><b>Ctrl+Enter</b>　保存到当前文件</li>
-                <li><b>Ctrl+Shift+Enter</b>　保存并跳到下一个文件</li>
-                <li>点进空格自动弹出<b>最近输入</b>，<b>Alt+↓</b> 手动弹出</li>
+                <li><b>打开文件</b>　整张表直接显示，光标自动落在底部空行</li>
+                <li><b>↑↓←→</b>　在单元格间移动焦点</li>
+                <li><b>Enter / 双击</b>　进入编辑；编辑中 <b>Enter</b> 下一行、<b>Tab</b> 右移</li>
+                <li><b>Ctrl+C / V / X</b>　复制 / 粘贴 / 剪切，支持从 Excel 直接粘贴整块</li>
+                <li><b>日期格</b>　点一下弹出日期选择器</li>
+                <li><b>Ctrl+S</b>　保存（覆盖整表，自动去掉尾部空行）</li>
                 <li>搜索支持拼音首字母，如 <b>wjy</b> 找「王金玉」</li>
               </ul>
             </div>
