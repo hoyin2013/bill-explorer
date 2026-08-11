@@ -16,6 +16,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   previewRows: (filePath: string, limit: number) => ipcRenderer.invoke('preview-rows', filePath, limit),
   // 向 Excel 文件批量追加多条账单记录
   appendMemo: (filePath: string, rows: Array<{
-    date: string; name: string; unit: string; qty: number; price: number; amount: number; person: string; remark: string
+    no: string; date: string; name: string; unit: string; qty: number; price: number; amount: number | ''; person: string; remark: string
   }>) => ipcRenderer.invoke('append-memo', { filePath, rows }),
+  // 覆盖更新同一文件连续编辑时上次写入的行
+  updateMemo: (filePath: string, rows: Array<{
+    no: string; date: string; name: string; unit: string; qty: number; price: number; amount: number | ''; person: string; remark: string
+  }>) => ipcRenderer.invoke('update-memo', { filePath, rows }),
+  // 获取最近修改历史
+  getHistory: () => ipcRenderer.invoke('get-history'),
+  // 清空最近修改历史
+  clearHistory: () => ipcRenderer.invoke('clear-history'),
 })

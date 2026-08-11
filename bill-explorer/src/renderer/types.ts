@@ -3,6 +3,13 @@ export interface PreviewRow {
   cells: Array<{ value: string; label?: string }>
 }
 
+// 最近修改历史记录
+export interface HistoryRecord {
+  filePath: string
+  fileName: string
+  time: string
+}
+
 export interface ElectronAPI {
   selectDirectory: () => Promise<string | null>
   getWorkDir: () => Promise<string>
@@ -18,12 +25,13 @@ export interface ElectronAPI {
     rows?: PreviewRow[]
   }>
   appendMemo: (filePath: string, rows: Array<{
+    no: string
     date: string
     name: string
     unit: string
     qty: number
     price: number
-    amount: number
+    amount: number | ''
     person: string
     remark: string
   }>) => Promise<{
@@ -32,6 +40,24 @@ export interface ElectronAPI {
     rowNumber?: number
     count?: number
   }>
+  updateMemo: (filePath: string, rows: Array<{
+    no: string
+    date: string
+    name: string
+    unit: string
+    qty: number
+    price: number
+    amount: number | ''
+    person: string
+    remark: string
+  }>) => Promise<{
+    error?: boolean
+    message?: string
+    rowNumber?: number
+    count?: number
+  }>
+  getHistory: () => Promise<HistoryRecord[]>
+  clearHistory: () => Promise<void>
 }
 
 export interface FileEntry {

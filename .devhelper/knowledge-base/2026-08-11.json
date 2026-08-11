@@ -1,0 +1,15 @@
+{
+  "date": "2026-08-11",
+  "entries": [
+    {
+      "id": "kb-1786408556029-q47ajul",
+      "content": "{\n  \"name\": \"bill-explorer\",\n  \"version\": \"1.0.0\",\n  \"private\": true,\n  \"main\": \"dist-electron/main.js\",\n  \"scripts\": {\n    \"dev\": \"vite\",\n    \"build:renderer\": \"tsc && vite build\",\n    \"build:main\": \"esbuild src/main/main.ts --bundle --platform=node --external:electron --format=cjs --outfile=dist-electron/main.js\",\n    \"build:preload\": \"esbuild src/main/preload.ts --bundle --platform=node --external:electron --format=cjs --outfile=dist-electron/preload.js\",\n    \"build:electron\": \"npm run build:main && npm run build:preload\",\n    \"build\": \"npm run build:renderer && npm run build:electron\",\n    \"electron:watch\": \"esbuild src/main/main.ts src/main/preload.ts --bundle --platform=node --external:electron --format=cjs --outdir=dist-electron --watch\",\n    \"preview\": \"vite preview\",\n    \"electron:preview\": \"npm run build && electron .\",\n    \"electron:build\": \"npm run build && electron-builder\",\n    \"electron:build:win\": \"npm run build && electron-builder --win\",\n    \"electron:build:portable\": \"npm run build && electron-builder --win portable\",\n    \"electron:build:mac\": \"npm run build && electron-builder --mac\",\n    \"start\": \"vite --host\"\n  },\n  \"dependencies\": {\n    \"electron-store\": \"^8.2.0\",\n    \"exceljs\": \"^4.4.0\",\n    \"pinyin-pro\": \"^3.24.0\",\n    \"react\": \"^18.3.1\",\n    \"react-dom\": \"^18.3.1\"\n  },\n  \"devDependencies\": {\n    \"@types/react\": \"^18.3.3\",\n    \"@types/react-dom\": \"^18.3.2\",\n    \"@vitejs/plugin-react\": \"^4.3.1\",\n    \"electron\": \"^31.0.0\",\n    \"electron-builder\": \"^24.13.3\",\n    \"esbuild\": \"^0.21.4\",\n    \"typescript\": \"^5.5.4\",\n    \"vite\": \"^5.3.4\"\n  },\n  \"build\": {\n    \"appId\": \"com.bill-explorer.app\",\n    \"productName\": \"BillExplorer\",\n    \"directories\": {\n      \"output\": \"release\"\n    },\n    \"files\": [\n      \"dist/**/*\",\n      \"dist-electron/**/*\",\n      \"package.json\"\n    ],\n    \"win\": {\n      \"target\": [\n        \"nsis\",\n        \"portable\"\n      ]\n    },\n    \"mac\": {\n      \"target\": \"dmg\"\n    },\n    \"linux\": {\n      \"target\": \"AppImage\"\n    }\n  }\n}\n",
+      "source": "package.json",
+      "sourceUri": "file:///d%3A/git/xiujuan/bill-explorer/package.json",
+      "createdAt": "2026-08-11T00:35:56.029Z",
+      "updatedAt": "2026-08-11T00:35:56.029Z",
+      "contentHash": "4294a0864e0efc06d0c2cdb4ff9c55bf20f4b7d2ff79fc949bb4f9e5b91ef02a",
+      "tags": []
+    }
+  ]
+}

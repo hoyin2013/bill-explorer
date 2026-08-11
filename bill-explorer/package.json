@@ -15,10 +15,12 @@
     "electron:preview": "npm run build && electron .",
     "electron:build": "npm run build && electron-builder",
     "electron:build:win": "npm run build && electron-builder --win",
+    "electron:build:portable": "npm run build && electron-builder --win portable",
     "electron:build:mac": "npm run build && electron-builder --mac",
     "start": "vite --host"
   },
   "dependencies": {
+    "@rollup/rollup-win32-x64-msvc": "^4.62.4",
     "electron-store": "^8.2.0",
     "exceljs": "^4.4.0",
     "pinyin-pro": "^3.24.0",
@@ -47,7 +49,10 @@
       "package.json"
     ],
     "win": {
-      "target": "nsis"
+      "target": [
+        "nsis",
+        "portable"
+      ]
     },
     "mac": {
       "target": "dmg"

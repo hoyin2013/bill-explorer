@@ -3,18 +3,19 @@ import { FileEntry, ElectronAPI } from '../types'
 
 interface BillRow {
   id: number
+  no: string
   date: string
   name: string
   unit: string
   qty: number
   price: number
-  amount: number
+  amount: number | ''
   person: string
   remark: string
 }
 
 const EMPTY: BillRow = {
-  id: 0, date: '', name: '', unit: '', qty: 0, price: 0, amount: 0, person: '', remark: '',
+  id: 0, no: '', date: '', name: '', unit: '', qty: 0, price: 0, amount: '', person: '', remark: '',
 }
 
 interface Props {
@@ -36,6 +37,7 @@ interface ColDef {
   width: number
 }
 const COLUMNS: ColDef[] = [
+  { field: 'no', label: '序号', width: 60 },
   { field: 'date', label: '日期', width: 90 },
   { field: 'name', label: '货品名称', width: 160 },
   { field: 'unit', label: '单位', width: 55 },
@@ -46,8 +48,11 @@ const COLUMNS: ColDef[] = [
   { field: 'remark', label: '备注', width: 130 },
 ]
 
-/* 可编辑字段（金额只读、由数量×单价自动计算） */
-const EDITABLE_FIELDS: (keyof BillRow)[] = ['date', 'name', 'unit', 'qty', 'price', 'person', 'remark']
+/* 可编辑字段（金额可手工调整；数量×单价变化时仍会自动重算） */
+const EDITABLE_FIELDS: (keyof BillRow)[] = ['no', 'date', 'name', 'unit', 'qty', 'price', 'amount', 'person', 'remark']
+
+/* 数字字段：数量 / 单价 / 金额 */
+const NUM_FIELDS: (keyof BillRow)[] = ['qty', 'price', 'amount']
 
 const MIN_COL_WIDTH = 50
 
@@ -94,7 +99,7 @@ export function MemoPanel({
 
   useEffect(() => {
     if (rows[0]) {
-      pendingFocus.current = { rowId: rows[0].id, colIdx: 1 }
+      pendingFocus.current = { rowId: rows[0].id, colIdx: 0 }
     }
   }, [])
 
@@ -159,37 +164,83 @@ export function MemoPanel({
     }
   }
 
+  // 键盘导航：方向键 / 回车在单元格间移动焦点
+  //  - 回车 = 向右；到行尾自动换到下一行起始；到最后一行自动补行
+  //  - 方向键 上下左右 在网格中移动，出界自动补行 / 环绕
   function handleCellKey(e: React.KeyboardEvent<HTMLInputElement>, rowId: number, colIdx: number) {
-    if (e.key === 'Enter') {
-      e.preventDefault()
-      const rowIdx = rows.findIndex((r) => r.id === rowId)
-      const lastEditableIdx = EDITABLE_FIELDS.length - 1
-      if (colIdx <= lastEditableIdx) {
-        if (colIdx < lastEditableIdx) {
-          const target = fieldRefs.current.get(rowId)?.[colIdx + 1]
-          if (target) target.focus()
-        } else {
-          const nextRow = rows[rowIdx + 1]
-          if (nextRow) {
-            const target = fieldRefs.current.get(nextRow.id)?.[colIdx]
-            if (target) target.focus()
-          } else {
-            const newId = _nextId++
-            setRows((prev) => [...prev, { ...EMPTY, id: newId }])
-            pendingFocus.current = { rowId: newId, colIdx }
-          }
-        }
+    const rowIdx = rows.findIndex((r) => r.id === rowId)
+    if (rowIdx < 0) return
+
+    let dRow = 0
+    let dCol = 0
+    switch (e.key) {
+      case 'Enter':
+      case 'ArrowRight':
+        dCol = 1
+        break
+      case 'ArrowLeft':
+        dCol = -1
+        break
+      case 'ArrowDown':
+        dRow = 1
+        break
+      case 'ArrowUp':
+        dRow = -1
+        break
+      default:
+        return
+    }
+    e.preventDefault()
+
+    const lastCol = EDITABLE_FIELDS.length - 1
+    let r = rowIdx + dRow
+    let c = colIdx + dCol
+
+    // 列到边界水平环绕：超出最右列 → 回到第 0 列并进入下一行
+    if (c > lastCol) {
+      c = 0
+      r += 1
+    } else if (c < 0) {
+      c = lastCol
+      r -= 1
+    }
+
+    if (r < 0) r = 0
+
+    if (r < rows.length) {
+      const target = fieldRefs.current.get(rows[r].id)?.[c]
+      if (target) {
+        pendingFocus.current = null
+        target.focus()
       }
+    } else {
+      // 超出最后一行：补足所需行数并聚焦目标格
+      const addCount = r - rows.length + 1
+      const newRows: BillRow[] = []
+      for (let k = 0; k < addCount; k += 1) newRows.push({ ...EMPTY, id: _nextId++ })
+      setRows((prev) => [...prev, ...newRows])
+      pendingFocus.current = { rowId: newRows[addCount - 1].id, colIdx: c }
     }
   }
 
-  function onChange(id: number, field: keyof BillRow, value: string | number) {
+  function onChange(id: number, field: keyof BillRow, rawValue: string) {
     setRows((prev) =>
       prev.map((r) => {
         if (r.id !== id) return r
-        const next = { ...r, [field]: value }
-        if (!isNaN(next.qty) && !isNaN(next.price)) {
-          next.amount = +(next.qty * next.price)
+        const next = { ...r }
+        if (field === 'amount') {
+          // 金额留空 → 保持空（保存时留空），否则转数字
+          next.amount = rawValue === '' ? '' : Number(rawValue)
+        } else if (field === 'qty' || field === 'price') {
+          next[field] = Number(rawValue) || 0
+        } else {
+          // 文本字段：no/date/name/unit/person/remark
+          const text = next as unknown as Record<string, string>
+          text[field] = rawValue
+        }
+        // 数量/单价变化时自动重算金额；金额手工留空则保留空
+        if (field !== 'amount' && next.qty !== 0 && next.price !== 0) {
+          next.amount = Number(next.qty) * Number(next.price)
         }
         return next
       }),
@@ -206,7 +257,7 @@ export function MemoPanel({
 
   function hasAnyData(): boolean {
     return rows.some(
-      (r) => r.date || r.name || r.unit || r.person || r.remark || r.qty !== 0 || r.price !== 0,
+      (r) => r.date || r.name || r.unit || r.person || r.remark || r.qty !== 0 || r.price !== 0 || (r.amount !== '' && r.amount !== 0),
     )
   }
 
@@ -244,9 +295,6 @@ export function MemoPanel({
       <table className="memo-table">
         <thead>
           <tr>
-            <th style={{ width: 32, minWidth: 32 }}>
-              <span>#</span>
-            </th>
             {COLUMNS.map((c, i) => (
               <th key={c.field} style={{ width: colWidths[i], minWidth: MIN_COL_WIDTH }}>
                 <span>{c.label}</span>
@@ -260,37 +308,23 @@ export function MemoPanel({
           </tr>
         </thead>
         <tbody>
-          {rows.map((r, rowIdx) => {
+          {rows.map((r) => {
             let colIdx = 0
             const cells = COLUMNS.map((c) => {
               const idx = colIdx
               colIdx += 1
-              const isEditable = EDITABLE_FIELDS.includes(c.field)
-              const isAmount = c.field === 'amount'
-              if (isAmount) {
-                return (
-                  <td key={c.field}>
-                    <span className="memo-amount">{r.amount ? r.amount.toFixed(2) : '0.00'}</span>
-                  </td>
-                )
-              }
+              const isNum = NUM_FIELDS.includes(c.field)
               return (
-                <td key={c.field} className={c.field === 'qty' || c.field === 'price' ? 'td-num' : ''}>
+                <td key={c.field} className={isNum ? 'td-num' : ''}>
                   <input
                     ref={setRef(r.id, idx)}
                     className="memo-input memo-input-inline"
-                    type={c.field === 'qty' ? 'number' : c.field === 'price' ? 'number' : 'text'}
-                    min={c.field === 'qty' || c.field === 'price' ? '0' : undefined}
-                    step={c.field === 'qty' ? '1' : c.field === 'price' ? '0.01' : undefined}
+                    type={isNum ? 'number' : 'text'}
+                    min={isNum ? '0' : undefined}
+                    step={isNum ? '1' : undefined}
                     value={(r[c.field] as number | string) || ''}
                     onChange={(e) =>
-                      onChange(
-                        r.id,
-                        c.field,
-                        c.field === 'qty' || c.field === 'price'
-                          ? Number(e.target.value) || 0
-                          : e.target.value,
-                      )
+                      onChange(r.id, c.field, e.target.value)
                     }
                     onKeyDown={(e) => handleCellKey(e, r.id, idx)}
                   />
@@ -299,7 +333,6 @@ export function MemoPanel({
             })
             return (
               <tr key={r.id} className="memo-row">
-                <td className="row-no">{rowIdx + 1}</td>
                 {cells}
               </tr>
             )
@@ -307,10 +340,9 @@ export function MemoPanel({
         </tbody>
         <tfoot>
           <tr>
-            <td></td>
-            <td colSpan={4} className="memo-total-label">合计金额</td>
-            <td><span className="memo-total">{totalAmount.toFixed(2)}</span></td>
-            <td colSpan={3}></td>
+            <td colSpan={6} className="memo-total-label">合计金额</td>
+            <td><span className="memo-total">{totalAmount}</span></td>
+            <td colSpan={2}></td>
           </tr>
         </tfoot>
       </table>

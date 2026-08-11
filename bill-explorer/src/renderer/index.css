@@ -507,3 +507,85 @@ body {
 .btn-outline { background: transparent; color: #409eff; border: 1px solid #409eff; }
 .btn-outline:hover { background: #f0f7ff; }
 .btn-add { font-weight: 600; }
+
+/* ---- 最近修改历史（固定在左侧底部，拖动顶部把手调整高度） ---- */
+.history-panel {
+  flex: 0 0 auto;
+  margin: 0;
+  border-top: 1px solid #e4e7ed;
+  border-radius: 0;
+  background: #fff;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  box-shadow: none;
+}
+/* 顶部把手：上下拖动调节面板高度 */
+.history-resize-handle {
+  flex: 0 0 auto;
+  height: 8px;
+  background: linear-gradient(135deg, transparent 40%, #c0c4cc 40%, #c0c4cc 60%, transparent 60%);
+  cursor: ns-resize;
+}
+.history-resize-handle .history-grab {
+  display: block;
+  width: 32px;
+  height: 3px;
+  margin: 2px auto;
+  background: #c0c4cc;
+  border-radius: 2px;
+}
+.history-resize-handle:hover .history-grab {
+  background: #909399;
+}
+.history-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 12px;
+  font-size: 12px;
+  color: #606266;
+  background: #fafafa;
+  border-bottom: 1px solid #ebeef5;
+}
+.history-clear {
+  border: none;
+  background: none;
+  color: #f56c6c;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 0;
+}
+.history-empty {
+  padding: 10px 12px;
+  font-size: 12px;
+  color: #c0c4cc;
+}
+.history-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  flex: 1;
+}
+.history-item {
+  padding: 6px 12px;
+  cursor: pointer;
+  border-bottom: 1px solid #f5f7fa;
+}
+.history-item:hover {
+  background: #f5f7fa;
+}
+.history-name {
+  font-size: 13px;
+  color: #303133;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.history-time {
+  font-size: 11px;
+  color: #909399;
+  margin-top: 2px;
+}
+

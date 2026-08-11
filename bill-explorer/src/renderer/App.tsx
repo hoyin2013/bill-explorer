@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { ElectronAPI, FileEntry } from './types'
+import { ElectronAPI, FileEntry, HistoryRecord } from './types'
 import { filterFiles } from './utils'
 import { DirectoryBar } from './components/DirectoryBar'
 import { ResultList } from './components/ResultList'
 import { MemoPanel } from './components/MemoPanel'
 import { ErrorMessage } from './components/ErrorMessage'
+import { HistoryList } from './components/HistoryList'
 
 // 安全检查：electronAPI 来自 preload，若为 undefined 说明 Electron 未正确加载 preload
 const api = window.electronAPI
@@ -51,7 +52,12 @@ function AppInner({ api }: { api: ElectronAPI }) {
   const [memoSaving, setMemoSaving] = useState(false)
   const [memoStatus, setMemoStatus] = useState('')
 
+  // ---- 最近修改历史 ----
+  const [history, setHistory] = useState<HistoryRecord[]>([])
+
   const searchRef = useRef<HTMLInputElement>(null)
+  // 记录最近一次保存的文件路径（用于"同一文件连续编辑 → 覆盖更新"）
+  const lastSavedFile = useRef<string | null>(null)
 
   // 每次窗口激活（从后台 / Dock 切回来）都把光标定位到搜索框，方便直接打字
   useEffect(() => {
@@ -68,7 +74,17 @@ function AppInner({ api }: { api: ElectronAPI }) {
   // 软件启动时自动加载上次持久化的工作目录
   useEffect(() => {
     loadWorkDir()
+    refreshHistory()
   }, [])
+
+  // 加载最近修改历史
+  async function refreshHistory() {
+    try {
+      setHistory((await api.getHistory()) || [])
+    } catch {
+      setHistory([])
+    }
+  }
 
   async function loadWorkDir() {
     try {
@@ -158,25 +174,58 @@ function AppInner({ api }: { api: ElectronAPI }) {
     }
   }
 
-  // ---- 关闭录入面板 ----
+  // ---- 关闭录入面板 ----（关闭后视为一次独立编辑会话，下次保存回到"追加"）
   function onCloseMemo() {
     setActiveFile(null)
     setMemoStatus('')
+    lastSavedFile.current = null
+  }
+
+  // ---- 点击历史记录：若在当前扫描结果中则打开录入，否则用系统程序打开 ----
+  async function onHistorySelect(filePath: string) {
+    const file = files.find((f) => f.filePath === filePath)
+    if (file) {
+      setActiveFile(file)
+      setMemoStatus('')
+    } else {
+      try {
+        await api.openFile(filePath)
+      } catch {
+        setMemoStatus('打开失败：' + filePath)
+        setTimeout(() => setMemoStatus(''), 3000)
+      }
+    }
+  }
+
+  // ---- 清空历史记录 ----
+  async function onClearHistory() {
+    try {
+      await api.clearHistory()
+      setHistory([])
+    } catch {
+      /* ignore */
+    }
   }
 
   // ---- 保存：把面板内的多行数据一次性写回 Excel ----
+  // 若与上次保存的是同一个文件（未切换其他 Excel），则覆盖更新上次写入的行，否则追加新记录
   async function onSaveMemo(rows: Array<{
-    date: string; name: string; unit: string; qty: number; price: number; amount: number; person: string; remark: string
+    no: string; date: string; name: string; unit: string; qty: number; price: number; amount: number | ''; person: string; remark: string
   }>) {
     if (!activeFile) return
     setMemoSaving(true)
     setMemoStatus('')
+    const isUpdate = lastSavedFile.current === activeFile.filePath
     try {
-      const result = await api.appendMemo(activeFile.filePath, rows)
+      const result = isUpdate
+        ? await api.updateMemo(activeFile.filePath, rows)
+        : await api.appendMemo(activeFile.filePath, rows)
       if (result.error) {
         setMemoStatus('保存失败：' + (result.message || '未知错误'))
       } else {
+        lastSavedFile.current = activeFile.filePath
         setMemoStatus(result.message || '已保存')
+        refreshHistory()
       }
     } catch (err) {
       setMemoStatus('保存失败：' + (err instanceof Error ? err.message : '未知错误'))
@@ -187,7 +236,7 @@ function AppInner({ api }: { api: ElectronAPI }) {
 
   // ---- 保存并前进到下一条 ----
   async function onSaveAndNext(rows: Array<{
-    date: string; name: string; unit: string; qty: number; price: number; amount: number; person: string; remark: string
+    no: string; date: string; name: string; unit: string; qty: number; price: number; amount: number | ''; person: string; remark: string
   }>) {
     await onSaveMemo(rows)
     if (!activeFile) return
@@ -243,6 +292,11 @@ function AppInner({ api }: { api: ElectronAPI }) {
             onOpen={onOpen}
             onOpenInExcel={onOpenInExcel}
           />
+          <HistoryList
+            records={history}
+            onSelect={onHistorySelect}
+            onClear={onClearHistory}
+          />
         </aside>
 
         <main className="app-main">
@@ -261,7 +315,8 @@ function AppInner({ api }: { api: ElectronAPI }) {
             <div className="idle-hint">
               <div className="idle-title">左侧选中文件，开始录入</div>
               <ul className="idle-list">
-                <li><b>Enter</b>　下一格，到底自动加行</li>
+                <li><b>←→↑↓</b>　方向键切换焦点</li>
+                <li><b>Enter</b>　向右移动，到行尾 / 最后一行自动换到下一行起始</li>
                 <li><b>Ctrl+Enter</b>　保存到当前文件</li>
                 <li><b>Ctrl+Shift+Enter</b>　保存并跳到下一个文件</li>
                 <li>搜索支持拼音首字母，如 <b>wjy</b> 找「王金玉」</li>

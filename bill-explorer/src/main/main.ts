@@ -1,15 +1,72 @@
 import { app, BrowserWindow, ipcMain, dialog } from 'electron'
 import Store from 'electron-store'
-import { join } from 'path'
+import { join, basename } from 'path'
 import { scanDirectory, openFile } from './file-service'
-import { appendRows, previewRows } from './excel-memo'
+import { appendRows, previewRows, updateRows } from './excel-memo'
 
-// 持久化配置存储，只保存工作目录路径
-const store = new Store<{ workDir?: string }>({
+// 最近修改历史的单条记录
+interface HistoryRecord {
+  filePath: string
+  fileName: string
+  time: string
+}
+
+// 历史记录最多保留条数
+const HISTORY_LIMIT = 50
+
+// 持久化配置存储：工作目录 + 最近修改历史
+const store = new Store<{ workDir?: string; history?: HistoryRecord[] }>({
   schema: {
     workDir: { type: 'string', default: '' },
+    history: { type: 'array', default: [] },
   },
 })
+
+// 记录一次成功保存：最新在前、按文件去重、最多保留 HISTORY_LIMIT 条
+function recordHistory(filePath: string) {
+  const time = new Date().toLocaleString('zh-CN', { hour12: false })
+  const entry: HistoryRecord = { filePath, fileName: basename(filePath), time }
+  const history = store.get('history') || []
+  const next = [entry, ...history.filter((h) => h.filePath !== filePath)]
+  store.set('history', next.slice(0, HISTORY_LIMIT))
+}
+
+// 记录每个文件最近一次写入的行范围（给"同一文件连续编辑 → 覆盖更新"用）
+const lastWriteMap = new Map<string, { startRow: number; count: number }>()
+
+// 行类型：amount 允许空字符串（表示金额留空）
+type MemoRow = {
+  no: string; date: string; name: string; unit: string
+  qty: number; price: number; amount: number | ''; person: string; remark: string
+}
+
+// 过滤空行 + 规范化：数量/单价转数字，金额留空则保持 ''
+function sanitizeRows(rows?: MemoRow[]): MemoRow[] {
+  return (rows || [])
+    .filter(
+      (r) => r.date || r.name || r.unit || r.person || r.remark ||
+        r.qty !== 0 || r.price !== 0 ||
+        (r.amount !== '' && r.amount != null && r.amount !== 0),
+    )
+    .map((r) => {
+      const qty = Number(r.qty) || 0
+      const price = Number(r.price) || 0
+      return {
+        ...r,
+        no: r.no || '',
+        qty,
+        price,
+        amount: (r.amount === '' || r.amount == null) ? '' : Number(r.amount),
+      }
+    })
+}
+
+// 处理 append / update 的结果：成功时记录历史 + 记录写入位置
+function afterWrite(filePath: string, result: { rowNumber?: number; count?: number; error?: boolean }) {
+  if (result.error || result.rowNumber == null) return
+  lastWriteMap.set(filePath, { startRow: result.rowNumber, count: result.count || 0 })
+  recordHistory(filePath)
+}
 
 // 文件路径（生产模式通过 file:// 加载）
 const PRELOAD_PATH = join(__dirname, 'preload.js')
@@ -103,29 +160,19 @@ ipcMain.handle('preview-rows', async (_event, filePath: string, limit?: number) 
 // ============ IPC 通道：向 Excel 文件批量追加多条账单记录 ============
 ipcMain.handle(
   'append-memo',
-  async (_event, payload: { filePath: string; rows: Array<{ date: string; name: string; unit: string; qty: number; price: number; amount: number; person: string; remark: string }> }) => {
+  async (_event, payload: { filePath: string; rows: MemoRow[] }) => {
     const { filePath, rows } = payload
     if (!filePath) {
       return { error: true, message: '文件路径不能为空。' }
     }
-    // 过滤空行 + 兜底补算金额
-    const valid = (rows || [])
-      .filter((r) => r.name || r.remark || r.unit || r.person || r.date || r.qty !== 0 || r.price !== 0)
-      .map((r) => {
-        const qty = Number(r.qty) || 0
-        const price = Number(r.price) || 0
-        return {
-          ...r,
-          qty,
-          price,
-          amount: !isNaN(qty) && !isNaN(price) ? +(qty * price) : (Number(r.amount) || 0),
-        }
-      })
+    const valid = sanitizeRows(rows)
     if (valid.length === 0) {
       return { error: true, message: '请至少填写一行有效数据。' }
     }
     try {
-      return await appendRows(filePath, valid)
+      const result = await appendRows(filePath, valid)
+      afterWrite(filePath, result)
+      return result
     } catch (err) {
       return {
         error: true,
@@ -134,3 +181,42 @@ ipcMain.handle(
     }
   },
 )
+
+// ============ IPC 通道：覆盖更新同一文件连续编辑时上次写入的行 ============
+ipcMain.handle(
+  'update-memo',
+  async (_event, payload: { filePath: string; rows: MemoRow[] }) => {
+    const { filePath, rows } = payload
+    if (!filePath) {
+      return { error: true, message: '文件路径不能为空。' }
+    }
+    const prev = lastWriteMap.get(filePath)
+    if (!prev) {
+      return { error: true, message: '该文件还没有可更新的记录。' }
+    }
+    const valid = sanitizeRows(rows)
+    if (valid.length === 0) {
+      return { error: true, message: '请至少填写一行有效数据。' }
+    }
+    try {
+      const result = await updateRows(filePath, valid, prev.startRow, prev.count)
+      afterWrite(filePath, result)
+      return result
+    } catch (err) {
+      return {
+        error: true,
+        message: err instanceof Error ? err.message : '更新失败',
+      }
+    }
+  },
+)
+
+// ============ IPC 通道：获取最近修改历史 ============
+ipcMain.handle('get-history', () => {
+  return store.get('history') || []
+})
+
+// ============ IPC 通道：清空最近修改历史 ============
+ipcMain.handle('clear-history', () => {
+  store.set('history', [])
+})
