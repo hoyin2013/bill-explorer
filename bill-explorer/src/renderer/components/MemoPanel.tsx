@@ -56,6 +56,39 @@ const NUM_FIELDS: (keyof BillRow)[] = ['qty', 'price', 'amount']
 
 const MIN_COL_WIDTH = 50
 
+/* 参与「最近输入」记忆的文本列（数字列不参与） */
+const TEXT_FIELDS: (keyof BillRow)[] = ['no', 'date', 'name', 'unit', 'person', 'remark']
+const HISTORY_KEY = 'bill-explorer:memo-history:v1'
+const HISTORY_CAP = 20
+
+type ColHistory = Record<string, string[]>
+
+function loadHistory(): ColHistory {
+  try {
+    const raw = localStorage.getItem(HISTORY_KEY)
+    if (!raw) return {}
+    const parsed = JSON.parse(raw)
+    return parsed && typeof parsed === 'object' ? (parsed as ColHistory) : {}
+  } catch {
+    return {}
+  }
+}
+
+function saveHistory(h: ColHistory) {
+  try {
+    localStorage.setItem(HISTORY_KEY, JSON.stringify(h))
+  } catch {
+    /* ignore */
+  }
+}
+
+function recordOne(h: ColHistory, field: string, value: string): ColHistory {
+  const v = value.trim()
+  if (!v) return h
+  const next = [v, ...(h[field] || []).filter((x) => x !== v)].slice(0, HISTORY_CAP)
+  return { ...h, [field]: next }
+}
+
 export function MemoPanel({
   file,
   api,
@@ -87,6 +120,121 @@ export function MemoPanel({
   const fieldRefs = useRef<Map<number, HTMLInputElement[]>>(new Map())
   const pendingFocus = useRef<{ rowId: number; colIdx: number } | null>(null)
 
+  /* ---- 最近输入记忆（Excel 式快捷输入） ---- */
+  const [colHistory, setColHistory] = useState<ColHistory>(() => loadHistory())
+  const historyRef = useRef(colHistory)
+
+  function updateHistory(field: string, value: string) {
+    const v = value.trim()
+    if (!v) return
+    historyRef.current = recordOne(historyRef.current, field, v)
+    setColHistory(historyRef.current)
+    saveHistory(historyRef.current)
+  }
+
+  // 把当前面板所有文本列的值批量记入历史（保存 / 关闭前兜底）
+  function recordAllRows() {
+    let h = historyRef.current
+    let changed = false
+    for (const r of rows) {
+      for (const f of TEXT_FIELDS) {
+        const v = String((r as unknown as Record<string, unknown>)[f] || '').trim()
+        if (!v) continue
+        const nh = recordOne(h, f, v)
+        if (nh !== h) {
+          h = nh
+          changed = true
+        }
+      }
+    }
+    if (changed) {
+      historyRef.current = h
+      setColHistory(h)
+      saveHistory(h)
+    }
+  }
+
+  /* ---- 单元格快捷输入下拉 ---- */
+  interface SuggestState {
+    rowId: number
+    colIdx: number
+    field: string
+    list: string[]
+    highlight: number
+    pos: { left: number; top: number; width: number }
+  }
+  const [suggest, setSuggest] = useState<SuggestState | null>(null)
+  const suggestRef = useRef<SuggestState | null>(null)
+  const openTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  function closeSuggest() {
+    if (openTimer.current) {
+      clearTimeout(openTimer.current)
+      openTimer.current = null
+    }
+    suggestRef.current = null
+    setSuggest(null)
+  }
+
+  function buildSuggest(rowId: number, colIdx: number, field: string, filter: string): SuggestState | null {
+    const all = historyRef.current[field] || []
+    const f = filter.trim()
+    const list = f ? all.filter((x) => x.toLowerCase().includes(f.toLowerCase())) : all
+    if (list.length === 0) return null
+    const input = fieldRefs.current.get(rowId)?.[colIdx]
+    if (!input) return null
+    const rect = input.getBoundingClientRect()
+    // 预估下拉高度（每项约 22px + 标题栏）
+    const dropH = Math.min(220, list.length * 22 + 30)
+    const belowSpace = window.innerHeight - rect.bottom - 2
+    const top = belowSpace >= dropH || rect.top - dropH - 2 < 0
+      ? rect.bottom + 2
+      : rect.top - dropH - 2
+    return {
+      rowId,
+      colIdx,
+      field,
+      list,
+      highlight: f ? Math.max(0, list.findIndex((x) => x.toLowerCase().includes(f.toLowerCase()))) : 0,
+      pos: { left: rect.left, top, width: Math.max(rect.width, 140) },
+    }
+  }
+
+  function selectSuggestion(s: SuggestState, value: string) {
+    setRows((prev) =>
+      prev.map((r) => {
+        if (r.id !== s.rowId) return r
+        const next = { ...r }
+        ;(next as unknown as Record<string, string | number | ''>)[s.field] = value
+        return next
+      }),
+    )
+    updateHistory(s.field, value)
+    const input = fieldRefs.current.get(s.rowId)?.[s.colIdx]
+    closeSuggest()
+    if (input) input.focus()
+  }
+
+  // 点击下拉外部（非输入框、非下拉框）时关闭
+  useEffect(() => {
+    const onDocMouseDown = (e: MouseEvent) => {
+      const t = e.target as HTMLElement | null
+      if (!t) return
+      if (t.closest('.memo-suggest')) return
+      if (t.classList.contains('memo-input-inline')) return
+      closeSuggest()
+    }
+    document.addEventListener('mousedown', onDocMouseDown)
+    return () => document.removeEventListener('mousedown', onDocMouseDown)
+  }, [])
+
+  // 高亮项滚动到可见区域
+  useEffect(() => {
+    if (!suggest) return
+    const el = document.querySelector('.memo-suggest li.is-hl')
+    el?.scrollIntoView({ block: 'nearest' })
+  }, [suggest?.highlight])
+
   useEffect(() => {
     const p = pendingFocus.current
     if (!p) return
@@ -108,12 +256,18 @@ export function MemoPanel({
       if (e.ctrlKey || e.metaKey) {
         if (e.key === 'Enter') {
           e.preventDefault()
+          recordAllRows()
           if (e.shiftKey) void onSaveAndNext(rows)
           else void onSave(rows)
           return
         }
       }
-      if (e.key === 'Escape') onClose()
+      if (e.key === 'Escape') {
+        // 下拉打开时 Esc 仅关闭下拉，由单元格层拦截（stopPropagation），这里作防御
+        if (suggestRef.current) return
+        recordAllRows()
+        onClose()
+      }
     }
     document.addEventListener('keydown', onKey)
     return () => document.removeEventListener('keydown', onKey)
@@ -170,6 +324,55 @@ export function MemoPanel({
   function handleCellKey(e: React.KeyboardEvent<HTMLInputElement>, rowId: number, colIdx: number) {
     const rowIdx = rows.findIndex((r) => r.id === rowId)
     if (rowIdx < 0) return
+    const row = rows[rowIdx]
+
+    /* ===== 最近输入下拉：优先处理 ===== */
+    const openSg = suggestRef.current
+    const onThisCell = !!openSg && openSg.rowId === rowId && openSg.colIdx === colIdx
+
+    // Alt+↓ / Alt+↑：手动弹出最近输入（已填内容也可换）
+    if (e.altKey && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
+      e.preventDefault()
+      const field = COLUMNS[colIdx]?.field as string
+      if (TEXT_FIELDS.includes(field as keyof BillRow)) {
+        const cur = String((row as unknown as Record<string, unknown>)[field] || '')
+        const sg = buildSuggest(rowId, colIdx, field, cur)
+        if (sg) {
+          suggestRef.current = sg
+          setSuggest(sg)
+        }
+      }
+      return
+    }
+
+    if (onThisCell) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        const next = { ...openSg, highlight: Math.min(openSg.list.length - 1, openSg.highlight + 1) }
+        suggestRef.current = next
+        setSuggest(next)
+        return
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        const next = { ...openSg, highlight: Math.max(0, openSg.highlight - 1) }
+        suggestRef.current = next
+        setSuggest(next)
+        return
+      }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault()
+        const item = openSg.list[openSg.highlight]
+        if (item !== undefined) selectSuggestion(openSg, item)
+        return
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        e.stopPropagation()
+        closeSuggest()
+        return
+      }
+    }
 
     let dRow = 0
     let dCol = 0
@@ -245,6 +448,43 @@ export function MemoPanel({
         return next
       }),
     )
+  }
+
+  /* ===== 最近输入：聚焦 / 失焦 / 输入 ===== */
+  function handleFocus(rowId: number, colIdx: number, field: string, value: string) {
+    if (openTimer.current) {
+      clearTimeout(openTimer.current)
+      openTimer.current = null
+    }
+    if (!TEXT_FIELDS.includes(field as keyof BillRow)) return
+    if (String(value || '').trim() !== '') return
+    openTimer.current = setTimeout(() => {
+      // 聚焦后延时弹出；期间若已输入内容则不弹
+      const input = fieldRefs.current.get(rowId)?.[colIdx]
+      if (input && input.value.trim() !== '') return
+      const sg = buildSuggest(rowId, colIdx, field, '')
+      if (sg) {
+        suggestRef.current = sg
+        setSuggest(sg)
+      }
+    }, 120)
+  }
+
+  function handleBlur(field: string, value: string) {
+    if (TEXT_FIELDS.includes(field as keyof BillRow)) updateHistory(field, value)
+    closeSuggest()
+  }
+
+  function onCellInput(rowId: number, colIdx: number, field: string, rawValue: string) {
+    const s = suggestRef.current
+    if (!s || s.rowId !== rowId || s.colIdx !== colIdx) return
+    const sg = buildSuggest(rowId, colIdx, field, rawValue)
+    if (sg) {
+      suggestRef.current = sg
+      setSuggest(sg)
+    } else {
+      closeSuggest()
+    }
   }
 
   function addRowWithId(id: number) {
@@ -323,8 +563,15 @@ export function MemoPanel({
                     min={isNum ? '0' : undefined}
                     step={isNum ? '1' : undefined}
                     value={(r[c.field] as number | string) || ''}
-                    onChange={(e) =>
+                    onChange={(e) => {
                       onChange(r.id, c.field, e.target.value)
+                      onCellInput(r.id, idx, c.field as string, e.target.value)
+                    }}
+                    onFocus={() =>
+                      handleFocus(r.id, idx, c.field as string, String((r[c.field] as number | string) ?? ''))
+                    }
+                    onBlur={() =>
+                      handleBlur(c.field as string, String((r[c.field] as number | string) ?? ''))
                     }
                     onKeyDown={(e) => handleCellKey(e, r.id, idx)}
                   />
@@ -350,13 +597,39 @@ export function MemoPanel({
       <div className="memo-spacer" />
 
       <div className="memo-footer">
-        <span className="memo-hint">Enter 下一格 · Ctrl+Enter 保存 · Ctrl+Shift+Enter 保存并下一条 · 拖表头调整列宽 · Esc 关闭</span>
+        <span className="memo-hint">Enter 下一格 · Ctrl+Enter 保存 · Ctrl+Shift+Enter 保存并下一条 · Alt+↓ 最近输入 · 拖表头调整列宽 · Esc 关闭</span>
         {status && (
           <span className={status.includes('失败') ? 'memo-status memo-error' : 'memo-status'}>
             {status}
           </span>
         )}
       </div>
+
+      {suggest && (
+        <div
+          className="memo-suggest"
+          style={{ left: suggest.pos.left, top: suggest.pos.top, width: suggest.pos.width }}
+          onMouseDown={(e) => e.preventDefault()}
+        >
+          <div className="memo-suggest-title">最近输入 · Enter 选择 · Esc 关闭</div>
+          <ul>
+            {suggest.list.map((item, i) => (
+              <li
+                key={`${suggest.field}-${i}`}
+                className={i === suggest.highlight ? 'is-hl' : ''}
+                onMouseEnter={() => {
+                  const next = { ...suggest, highlight: i }
+                  suggestRef.current = next
+                  setSuggest(next)
+                }}
+                onClick={() => selectSuggestion(suggest, item)}
+              >
+                {item}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   )
 }

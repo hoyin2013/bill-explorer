@@ -319,6 +319,7 @@ function AppInner({ api }: { api: ElectronAPI }) {
                 <li><b>Enter</b>　向右移动，到行尾 / 最后一行自动换到下一行起始</li>
                 <li><b>Ctrl+Enter</b>　保存到当前文件</li>
                 <li><b>Ctrl+Shift+Enter</b>　保存并跳到下一个文件</li>
+                <li>点进空格自动弹出<b>最近输入</b>，<b>Alt+↓</b> 手动弹出</li>
                 <li>搜索支持拼音首字母，如 <b>wjy</b> 找「王金玉」</li>
               </ul>
             </div>

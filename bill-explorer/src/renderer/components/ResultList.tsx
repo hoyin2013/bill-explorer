@@ -59,6 +59,27 @@ export function ResultList({
     onOpenInExcel?.(index)
   }
 
+  // ---- 悬停预览开关（默认关闭，避免弹出挡视线；选择持久化） ----
+  const PREVIEW_KEY = 'bill-explorer:preview-enabled'
+  const [previewEnabled, setPreviewEnabled] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(PREVIEW_KEY) === '1'
+    } catch {
+      return false
+    }
+  })
+
+  function togglePreview() {
+    const next = !previewEnabled
+    setPreviewEnabled(next)
+    try {
+      localStorage.setItem(PREVIEW_KEY, next ? '1' : '0')
+    } catch {
+      /* ignore */
+    }
+    if (!next) setPreview(null)
+  }
+
   // ---- 悬停预览 ----
   const [preview, setPreview] = useState<PreviewState | null>(null)
   const wrapRef = useRef<HTMLDivElement | null>(null)
@@ -101,6 +122,7 @@ export function ResultList({
   }
 
   const handleItemEnter = (index: number) => {
+    if (!previewEnabled) return
     const file = files[index]
     if (!file) return
     clearTimeout(previewTimer.current || 0)
@@ -154,10 +176,19 @@ export function ResultList({
   return (
     <div ref={wrapRef} className="result-wrap">
       <div className="result-stats">
-        {query.trim()
-          ? `共 ${totalCount} 个文件，匹配 ${filteredCount} 个`
-          : `共 ${totalCount} 个文件`}
-        <span className="result-tip">单击录入 · 双击 Excel 打开 · 悬停预览</span>
+        <span>
+          {query.trim()
+            ? `共 ${totalCount} 个文件，匹配 ${filteredCount} 个`
+            : `共 ${totalCount} 个文件`}
+        </span>
+        <span className="result-tip">单击录入 · 双击 Excel 打开</span>
+        <button
+          className={previewEnabled ? 'preview-toggle is-on' : 'preview-toggle'}
+          onClick={togglePreview}
+          title={previewEnabled ? '关闭悬停预览（默认关闭，避免挡视线）' : '开启悬停预览'}
+        >
+          悬停预览 {previewEnabled ? '开' : '关'}
+        </button>
       </div>
       <ul className="file-list">
         {files.map((f, i) => (
@@ -167,7 +198,7 @@ export function ResultList({
               f.filePath === activeFile?.filePath ? 'file-item is-active' : 'file-item'
             }
             key={f.filePath + i}
-            title="单击打开录入，双击用 Excel 打开，悬停预览"
+            title="单击打开录入，双击用 Excel 打开"
             onClick={() => handleClick(i)}
             onDoubleClick={(e) => {
               e.stopPropagation()
@@ -196,6 +227,13 @@ export function ResultList({
                 {preview.data.sheetName} · {preview.data.totalRows} 行
               </span>
             )}
+            <button
+              className="preview-close"
+              title="关闭预览"
+              onClick={() => setPreview(null)}
+            >
+              ✕
+            </button>
           </div>
           {preview.loading ? (
             <div className="preview-body">加载中...</div>

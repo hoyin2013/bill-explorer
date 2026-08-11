@@ -153,6 +153,33 @@ body {
   font-size: 12px;
   color: #909399;
   background: #fafafa;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.result-tip {
+  flex-shrink: 0;
+}
+.preview-toggle {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: 11px;
+  padding: 2px 8px;
+  border: 1px solid #dcdfe6;
+  border-radius: 4px;
+  background: #fff;
+  color: #909399;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.preview-toggle:hover {
+  border-color: #409eff;
+  color: #409eff;
+}
+.preview-toggle.is-on {
+  border-color: #409eff;
+  color: #409eff;
+  background: #ecf5ff;
 }
 .file-list {
   flex: 1;
@@ -215,6 +242,21 @@ body {
   border: 1px solid #d0d0d0;
   padding: 2px 8px;
   border-radius: 4px;
+}
+.preview-close {
+  flex-shrink: 0;
+  border: none;
+  background: transparent;
+  color: #909399;
+  font-size: 13px;
+  line-height: 1;
+  padding: 2px 4px;
+  cursor: pointer;
+  border-radius: 3px;
+}
+.preview-close:hover {
+  color: #f56c6c;
+  background: #fde8e8;
 }
 .preview-body {
   padding: 0;
@@ -498,6 +540,49 @@ body {
 .memo-hint { color: #909399; font-size: 11px; }
 .memo-status { font-size: 12px; color: #67c23a; font-weight: 500; }
 .memo-error { color: #f56c6c; }
+
+/* ---- 单元格最近输入下拉（Excel 式快捷输入） ---- */
+.memo-suggest {
+  position: fixed;
+  z-index: 2000;
+  background: #fff;
+  border: 1px solid #c0c4cc;
+  border-radius: 4px;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.15);
+  max-height: 220px;
+  overflow: auto;
+  font-size: 12px;
+}
+.memo-suggest-title {
+  padding: 4px 10px;
+  font-size: 11px;
+  color: #909399;
+  background: #fafafa;
+  border-bottom: 1px solid #ebeef5;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+.memo-suggest ul {
+  list-style: none;
+  margin: 0;
+  padding: 2px 0;
+}
+.memo-suggest li {
+  padding: 4px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #303133;
+}
+.memo-suggest li:hover {
+  background: #f0f7ff;
+}
+.memo-suggest li.is-hl {
+  background: #409eff;
+  color: #fff;
+}
 
 /* 通用按钮微调 */
 .btn-small { padding: 4px 10px; font-size: 12px; }

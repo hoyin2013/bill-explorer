@@ -1,0 +1,53 @@
+# 用 GitHub Actions 在云端（Windows runner）打包 Windows 安装包
+#
+# 触发方式：
+#   1. 手动触发：仓库 Actions 页面 → 左侧 Build Windows Installer → Run workflow
+#   2. 自动触发：推送形如 v1.0.0 的 tag（同时会自动创建 GitHub Release 并附带安装包）
+#
+# 产物：release/ 下的 NSIS 安装包 + Portable 便携版（.exe）
+
+name: Build Windows Installer
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build & package (NSIS + Portable)
+        run: npm run electron:build:win
+        env:
+          # 没有代码签名证书时跳过证书自动发现，避免构建中断
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+
+      - name: Upload Windows installer as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BillExplorer-windows
+          path: |
+            release/*.exe
+            release/*.blockmap
+            release/*.yml
+
+      - name: Publish to GitHub Release (only when triggered by a tag)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            release/*.exe
