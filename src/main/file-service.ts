@@ -110,6 +110,20 @@ export function openFile(filePath: string): {
   }
 }
 
+// ============ 在文件管理器中打开文件所在文件夹并选中该文件 ============
+export function revealFile(filePath: string): {
+  error?: boolean
+  message?: string
+} {
+  try {
+    shell.showItemInFolder(filePath)
+    return {}
+  } catch (err) {
+    const message = err instanceof Error ? err.message : '打开所在文件夹失败'
+    return { error: true, message }
+  }
+}
+
 // ============ 类型定义 ============
 export interface FileIndex {
   fileNameLower: string

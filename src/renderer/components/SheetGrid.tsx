@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { FileEntry, ElectronAPI } from '../types'
+import { FileEntry, ElectronAPI, AIRecognizedRow } from '../types'
 
 /* 固定 9 列（列数不动，就这么多列），type 决定编辑控件与写回格式 */
 interface ColDef {
@@ -130,6 +130,18 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
   const [saving, setSaving] = useState(false)
   const [status, setStatus] = useState('')
   const [loaded, setLoaded] = useState(false)
+
+  // 接收独立"小票识图"窗口发来的回填请求（用户主动点击"填入当前录入"才触发，不影响录入）
+  const applyRowsRef = useRef(applyRecognizedRows)
+  applyRowsRef.current = applyRecognizedRows
+  useEffect(() => {
+    const off = api.on('apply-recognized-rows', (rows) => {
+      if (Array.isArray(rows)) applyRowsRef.current(rows as AIRecognizedRow[], true)
+    })
+    return off
+  }, [api])
+  // 由 AI 图片识别自动预录的行（绝对行号集合）：这些行用不同底色高亮，便于和手输区分
+  const [autoRows, setAutoRows] = useState<Set<number>>(new Set())
   // 当前"录入行"：单击已有内容单元格时把值复制到这一行；键盘落到空行时自动跟随
   const [inputRow, setInputRow] = useState(0)
   // 点行号选中的整行（可 Ctrl 多选 / Shift 范围选），右键菜单的"删除行"作用于此
@@ -210,6 +222,7 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
     setEditing(false)
     setDirty(true)
     setSelRows(new Set())
+    setAutoRows(new Set())
     lastCommitKeyRef.current = null
     setActive((a) => ({ r: Math.min(a.r, Math.max(0, snap.length - 1)), c: a.c }))
     syncHist()
@@ -227,6 +240,7 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
     setGrid(snap)
     setEditing(false)
     setDirty(true)
+    setAutoRows(new Set())
     lastCommitKeyRef.current = null
     setActive((a) => ({ r: Math.min(a.r, Math.max(0, snap.length - 1)), c: a.c }))
     syncHist()
@@ -269,6 +283,7 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
       // 在下方预备一批空行，方便连续快捷录入
       while (rows.length < target + PREPARED_EMPTY_ROWS) rows.push(emptyRow())
       setGrid(rows)
+      setAutoRows(new Set())
       setInputRow(target)
       setActive({ r: target, c: 0 }) // 光标定位到最底下（数据末尾）第一列
       setLoaded(true)
@@ -380,6 +395,13 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
       return next
     })
     setDirty(true)
+    // 用户手动改过这一格 → 该行不再是"纯 AI 预录"，去掉高亮色
+    setAutoRows((prev) => {
+      if (!prev.has(r)) return prev
+      const n = new Set(prev)
+      n.delete(r)
+      return n
+    })
   }, [pushUndo])
 
   const clearCell = useCallback((r: number, c: number) => {
@@ -466,6 +488,7 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
     const target = bottomEntryRow(next)
     while (next.length < target + PREPARED_EMPTY_ROWS) next.push(emptyRow())
     setGrid(next)
+    setAutoRows(new Set()) // 行列重排，自动着色行号已失效，重置
     setSelRows(new Set())
     setEditing(false)
     setDirty(true)
@@ -484,6 +507,7 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
     const pos = Math.max(0, Math.min(at, next.length))
     next.splice(pos, 0, ...Array.from({ length: count }, () => emptyRow()))
     setGrid(next)
+    setAutoRows(new Set()) // 插入后行号重排，重置自动着色
     setSelRows(new Set())
     setDirty(true)
     setActive({ r: pos, c: 0 })
@@ -998,6 +1022,100 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
     onClose()
   }
 
+  /* ===================== 恢复上一个版本（回滚到保存前的备份） ===================== */
+  async function handleRestore() {
+    if (saving) return
+    setStatus('')
+    try {
+      const res = await api.listBackups(file.filePath)
+      if (res.error) {
+        setStatus('读取备份失败：' + (res.message || '未知错误'))
+        return
+      }
+      const backups = res.backups || []
+      if (backups.length === 0) {
+        setStatus('没有可恢复的版本（保存后才会自动生成备份）')
+        return
+      }
+      const t = backups[0].time
+      if (!window.confirm(`确定恢复上一个版本吗？\n版本时间：${t}\n（当前内容会先自动备份，可再次恢复）`)) {
+        return
+      }
+      setSaving(true)
+      const r = await api.restoreBackup(file.filePath)
+      if (r.error) {
+        setStatus('恢复失败：' + (r.message || '未知错误'))
+        return
+      }
+      // 重新加载该文件内容到网格
+      const res2 = await api.loadSheet(file.filePath)
+      if (res2.error) {
+        setStatus('恢复成功，但重新读取失败：' + (res2.message || ''))
+        return
+      }
+      const rows = (res2.rows || []).map((rr) => normalizeRow(rr))
+      const target = bottomEntryRow(rows)
+      while (rows.length < target + PREPARED_EMPTY_ROWS) rows.push(emptyRow())
+      setGrid(rows)
+      setInputRow(target)
+      setActive({ r: target, c: 0 })
+      setDirty(false)
+      setStatus(r.message || '已恢复上一个版本')
+      onSaved()
+    } catch (err) {
+      setStatus('恢复失败：' + (err instanceof Error ? err.message : '未知错误'))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  /* ===================== AI 识别结果回填 ===================== */
+  function applyRecognizedRows(rows: AIRecognizedRow[], append = false) {
+    if (!rows.length) return
+    pushUndo()
+    lastCommitKeyRef.current = null
+    const start = append ? bottomEntryRow(gridRef.current) : activeRef.current.r
+    const filled: number[] = []
+    for (let i = 0; i < rows.length; i += 1) filled.push(start + i)
+    setGrid((prev) => {
+      const next = prev.map((row) => row.slice())
+      let pos = start
+      for (const r of rows) {
+        if (pos >= next.length) next.push(emptyRow())
+        const q = Number(String(r.qty ?? '').replace(/,/g, '')) || 0
+        const p = Number(String(r.price ?? '').replace(/,/g, '')) || 0
+        const a = Number(String(r.amount ?? '').replace(/,/g, '')) || 0
+        next[pos] = [
+          String(r.no ?? ''),
+          parseDateText(String(r.date ?? '')),
+          String(r.name ?? ''),
+          String(r.unit ?? ''),
+          q > 0 ? fmtNum(q) : '',
+          p > 0 ? fmtNum(p) : '',
+          a > 0 ? fmtNum(a) : '',
+          String(r.person ?? ''),
+          String(r.remark ?? ''),
+        ]
+        pos += 1
+      }
+      // 保证底部仍有预备空行
+      const target = bottomEntryRow(next)
+      while (next.length < target + PREPARED_EMPTY_ROWS) next.push(emptyRow())
+      return next
+    })
+    // 标记这些行为"AI 自动预录"，渲染时高亮区分
+    setAutoRows((prev) => {
+      const n = new Set(prev)
+      filled.forEach((p) => n.add(p))
+      return n
+    })
+    setDirty(true)
+    setInputRow(start)
+    setActive({ r: start, c: 0 })
+    setEditing(true)
+    setStatus(`已填入 ${rows.length} 行识别结果（黄色高亮为 AI 预录，修改后自动转白）`)
+  }
+
   /* ===================== 列宽拖拽 ===================== */
   const resizeState = useRef<{ colIdx: number; startX: number; startWidth: number } | null>(null)
   const onStartResize = (colIdx: number, e: React.MouseEvent) => {
@@ -1222,22 +1340,31 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
           <button className="btn btn-outline" onClick={() => api.openFile(file.filePath)} title="用 Excel 程序打开">
             Excel 打开
           </button>
+          <button
+            className="btn btn-outline"
+            disabled={saving}
+            onClick={handleRestore}
+            title="恢复保存前的上一个版本（每次保存都会自动备份，可多次回滚）"
+          >
+            恢复上一版本
+          </button>
           <button className="btn btn-small btn-close" onClick={handleClose} title="Esc 关闭">
             关闭
           </button>
         </div>
       </div>
 
-      <div
-        className="sheet-scroll"
-        ref={containerRef}
-        tabIndex={0}
-        onKeyDown={onContainerKey}
-        onCopy={onCopy}
-        onCut={onCut}
-        onPaste={onPaste}
-      >
-        <table className="sheet-table">
+      <div className="sheet-body">
+        <div
+          className="sheet-scroll"
+          ref={containerRef}
+          tabIndex={0}
+          onKeyDown={onContainerKey}
+          onCopy={onCopy}
+          onCut={onCut}
+          onPaste={onPaste}
+        >
+          <table className="sheet-table">
           <colgroup>
             <col style={{ width: 36 }} />
             {colWidths.map((w, i) => (
@@ -1266,7 +1393,8 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
                 className={
                   (r === entryRow ? 'entry-row' : '') +
                   (r === active.r ? ' row-active' : '') +
-                  (selRows.has(r) ? ' row-selected' : '')
+                  (selRows.has(r) ? ' row-selected' : '') +
+                  (autoRows.has(r) ? ' row-auto' : '')
                 }
               >
                 <td
@@ -1326,6 +1454,8 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
           </tbody>
         </table>
       </div>
+
+    </div>
 
       {suggest && suggest.rect && (
         <ul

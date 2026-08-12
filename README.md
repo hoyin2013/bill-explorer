@@ -1,4 +1,4 @@
-# 账单文件查找器 (BillExplorer)
+# 账单录入器 (BillExplorer)
 
 基于 **Electron + React + TypeScript + Vite** 的本地桌面工具，用于快速定位、打开本地大量账单 Excel 文件。纯本地运行，无云端请求，不读取 Excel 表格内部单元格内容，只操作文件系统。
 

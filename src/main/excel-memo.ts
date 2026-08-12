@@ -1,6 +1,87 @@
-import { readFileSync, existsSync, accessSync, constants as FSConstants } from 'fs'
-import { extname } from 'path'
+import { readFileSync, existsSync, accessSync, readdirSync, constants as FSConstants } from 'fs'
+import { copyFile, mkdir, readdir, unlink } from 'fs/promises'
+import { dirname, basename, extname, join } from 'path'
 import * as ExcelJS from 'exceljs'
+import { dialog } from 'electron'
+
+// ============ 超大文件保护 ============
+// 异常情况：不规范文件末尾大量空行、或在百万行位置残留一个孤立数字，
+// 导致 ExcelJS 的 ws.rowCount 达到 100 万+ 行。打开时若逐行读取会实例化上百万行，
+// 直接把程序卡死。超过此阈值即视为“异常超大”，直接拒绝打开并弹窗提示（不读取数据）。
+const SAFE_MAX_ROWS = 100_000
+
+// ============ 版本备份：保存前自动备份，便于“恢复上一个版本” ============
+// 备份放在与文件同级的隐藏目录 `.billbackups` 下；扫描器跳过 `.` 前缀目录，不会被当成文件列出。
+const BACKUP_DIR_NAME = '.billbackups'
+// 每个文件最多保留的备份份数（超出删最旧的）
+const MAX_BACKUPS = 5
+
+// 备份文件名带时间戳（精确到毫秒，避免同一秒内多次保存时文件名撞车互相覆盖），
+// 例如：账单.xlsx.20260812-101530123.bak
+function backupFileName(filePath: string, date: Date): string {
+  const base = basename(filePath)
+  const pad = (n: number, w = 2) => String(n).padStart(w, '0')
+  const ts = `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}${pad(date.getMilliseconds(), 3)}`
+  return `${base}.${ts}.bak`
+}
+
+// 写入前先备份当前文件（异步，避免大文件阻塞主线程）。备份失败不影响保存。
+async function backupBeforeWrite(filePath: string): Promise<string | null> {
+  if (!existsSync(filePath)) return null
+  try {
+    const dir = dirname(filePath)
+    const bakDir = join(dir, BACKUP_DIR_NAME)
+    await mkdir(bakDir, { recursive: true })
+    const target = join(bakDir, backupFileName(filePath, new Date()))
+    await copyFile(filePath, target)
+    // 清理多余备份：按时间戳升序，删最旧的，保留最近 MAX_BACKUPS 份
+    const base = basename(filePath)
+    const list = (await readdir(bakDir))
+      .filter((n) => n.startsWith(base + '.') && n.endsWith('.bak'))
+      .sort() // 时间戳格式可字典序排序，最早在前
+    while (list.length > MAX_BACKUPS) {
+      const old = list.shift()!
+      try { await unlink(join(bakDir, old)) } catch { /* ignore */ }
+    }
+    return target
+  } catch (err) {
+    // 备份失败不应阻断保存，仅记录
+    console.warn('[backup] 创建备份失败：', err)
+    return null
+  }
+}
+
+// 列出某文件可用的备份（新 → 旧），time 形如 20260812-101530
+export function listBackups(filePath: string): Array<{ path: string; time: string }> {
+  const dir = dirname(filePath)
+  const bakDir = join(dir, BACKUP_DIR_NAME)
+  if (!existsSync(bakDir)) return []
+  const base = basename(filePath)
+  const list = readdirSync(bakDir)
+    .filter((n) => n.startsWith(base + '.') && n.endsWith('.bak'))
+    .sort()
+    .reverse()
+  return list.map((n) => {
+    const ts = n.slice(base.length + 1, n.length - '.bak'.length)
+    return { path: join(bakDir, n), time: ts }
+  })
+}
+
+// 恢复最近一份备份：先备份“当前（可能已损坏）文件”，再把最新备份复制回去（恢复操作本身可逆）
+export async function restoreBackup(filePath: string): Promise<{ error?: boolean; message?: string; backupTime?: string }> {
+  const backups = listBackups(filePath)
+  if (backups.length === 0) {
+    return { error: true, message: '没有可恢复的备份版本（保存后才会生成备份）。' }
+  }
+  const latest = backups[0]
+  try {
+    await backupBeforeWrite(filePath)
+    await copyFile(latest.path, filePath)
+    return { message: `已恢复版本：${latest.time}`, backupTime: latest.time }
+  } catch (err) {
+    return { error: true, message: '恢复失败：' + (err instanceof Error ? err.message : '未知错误') }
+  }
+}
 
 // ============ 预览：读取文件最近 N 行数据（不修改文件） ============
 export interface PreviewCell {
@@ -48,9 +129,21 @@ export async function previewRows(
     return { error: true, message: '无法读取文件，可能被 Excel 锁定或已损坏。' }
   }
 
-  const ws = workbook.worksheets[0]
+  const ws = pickDataSheet(workbook)
   if (!ws || ws.rowCount === 0) {
     return { sheetName: ws?.name || '', totalRows: 0, headerLabels: [], rows: [] }
+  }
+
+  // 防卡死：异常超大文件直接跳过预览，避免从百万行自底向上扫描导致卡顿。
+  if (ws.rowCount > SAFE_MAX_ROWS) {
+    return {
+      error: true,
+      message: `文件过大（约 ${ws.rowCount.toLocaleString('zh-CN')} 行），疑似异常超大，已跳过预览以免卡顿。`,
+      sheetName: ws.name || '',
+      totalRows: 0,
+      headerLabels: [],
+      rows: [],
+    }
   }
 
   // 表头：取第一行
@@ -145,6 +238,35 @@ function findColByLabel(row: ExcelJS.Row, label: string): number {
 // 一行里至少有一个非空字段，才算有效记录（避免把空行写进 Excel）
 function isEmptyRow(r: BillRecord): boolean {
   return !r.date && !r.name && !r.unit && !r.person && !r.remark && r.qty === 0 && r.price === 0 && !r.amount
+}
+
+// 选“数据所在工作表”：优先用首行匹配到 9 列账单表头最多的那张；
+// 这样即使数据不在第一张表（如多了封面/目录表），也能正确读写，
+// 避免只读 worksheets[0] 导致的漏读 / 误以为内容被清空。
+function headerMatchScore(ws: ExcelJS.Worksheet): number {
+  const headRow = ws.getRow(1)
+  const labels = new Set(HEADER.map((h) => h.label))
+  let score = 0
+  const maxCol = Math.max(ws.columnCount, HEADER.length)
+  for (let c = 1; c <= maxCol; c += 1) {
+    const v = headRow.getCell(c).value
+    if (v != null && labels.has(String(v).trim())) score += 1
+  }
+  return score
+}
+function pickDataSheet(workbook: ExcelJS.Workbook): ExcelJS.Worksheet | undefined {
+  const sheets = workbook.worksheets
+  if (sheets.length === 0) return undefined
+  let best = sheets[0]
+  let bestScore = headerMatchScore(best)
+  for (let i = 1; i < sheets.length; i += 1) {
+    const s = headerMatchScore(sheets[i])
+    if (s > bestScore) {
+      bestScore = s
+      best = sheets[i]
+    }
+  }
+  return best
 }
 
 // 标准日期字符串转 JS Date（Excel 原生日期），非法/空值原样返回
@@ -271,6 +393,8 @@ export async function appendRows(
   })
 
   try {
+    // 写入前先备份当前文件，便于“恢复上一个版本”
+    await backupBeforeWrite(filePath)
     await workbook.xlsx.writeFile(filePath)
   } catch (err) {
     return {
@@ -360,9 +484,26 @@ export async function loadSheet(filePath: string): Promise<SheetData> {
     }
   }
 
-  const ws = workbook.worksheets[0]
+  const ws = pickDataSheet(workbook)
   if (!ws) {
     return { error: true, message: 'Excel 文件中没有找到工作表。', headerLabels: [], rows: [] }
+  }
+
+  // 防卡死：异常超大文件（多为末尾空行 + 某行一个孤立数据，rowCount 达百万级）直接拒绝打开，
+  // 避免逐行读取百万行把程序卡死。仅用 O(1) 的 rowCount 判断，不触碰任何单元格。
+  if (ws.rowCount > SAFE_MAX_ROWS) {
+    const rc = ws.rowCount
+    const msg =
+      `文件「${basename(filePath)}」疑似异常超大（约 ${rc.toLocaleString('zh-CN')} 行）。\n\n` +
+      `这类文件通常不规范：末尾存在大量空行，或在百万行位置残留孤立数据。若直接打开，程序会逐行读取上百万行而卡死。\n\n` +
+      `已阻止打开。请先在 Excel 中清理多余行与格式、删除孤立数据后另存，再重新打开本程序。`
+    try { dialog.showErrorBox('文件过大，已阻止打开', msg) } catch { /* 弹窗失败不影响返回错误 */ }
+    return {
+      error: true,
+      message: `文件过大（约 ${rc.toLocaleString('zh-CN')} 行），已阻止打开以免程序卡死。请在 Excel 中清理多余行后重试。`,
+      headerLabels: [],
+      rows: [],
+    }
   }
 
   const headerLabels = HEADER.map((h) => h.label)
@@ -457,17 +598,14 @@ export async function saveSheet(
     }
   }
 
-  const firstWs = workbook.worksheets[0]
-  if (!firstWs) {
+  // 选数据所在的工作表（按表头匹配，兼容数据不在第一张表的情况），
+  // 直接在原表覆盖写入——不再 removeWorksheet + addWorksheet。
+  // 旧写法会把新建表追加到末尾，导致其它表升到 worksheets[0]，
+  // 而本应用只读第一张表，于是下次打开误以为“内容被清空”。
+  const ws = pickDataSheet(workbook)
+  if (!ws) {
     return { error: true, message: 'Excel 文件中没有找到工作表。' }
   }
-
-  // 重建第一张工作表：删除后重新添加，可彻底丢弃尾部空行 / 旧数据，
-  // 让保存后的文件 rowCount 等于实际行数（Excel 不再显示大片空白）。
-  // 其它工作表原样保留。
-  const sheetName = firstWs.name || 'Sheet1'
-  workbook.removeWorksheet(firstWs.id)
-  const ws = workbook.addWorksheet(sheetName)
 
   const startRow = 2
   const lastNeeded = startRow + rows.length - 1
@@ -511,7 +649,16 @@ export async function saveSheet(
     })
   })
 
+  // 清空数据区之后的多余行（旧数据残留 / 尾部空行），避免文件尾部堆积旧数据。
+  // 注意：ExcelJS 的 spliceRows 对“尾部行”无效（其删除分支要求删除区间之后还有行），
+  // 因此这里直接把尾部行的单元格值置空——空行不会被写入文件，读回时 rowCount 自然收敛。
+  for (let r = lastNeeded + 1; r <= ws.rowCount; r += 1) {
+    ws.getRow(r).values = []
+  }
+
   try {
+    // 写入前先备份当前文件，便于“恢复上一个版本”
+    await backupBeforeWrite(filePath)
     await workbook.xlsx.writeFile(filePath)
   } catch (err) {
     return {
@@ -601,6 +748,8 @@ export async function updateRows(
   }
 
   try {
+    // 写入前先备份当前文件，便于“恢复上一个版本”
+    await backupBeforeWrite(filePath)
     await workbook.xlsx.writeFile(filePath)
   } catch (err) {
     return {

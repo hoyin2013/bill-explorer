@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import type { AIRecognizedRow } from '../renderer/types'
 
 // 暴露给渲染进程的安全 IPC API（contextIsolation 下必须通过此桥接）
 contextBridge.exposeInMainWorld('electronAPI', {
@@ -26,8 +27,46 @@ contextBridge.exposeInMainWorld('electronAPI', {
   loadSheet: (filePath: string) => ipcRenderer.invoke('load-sheet', filePath),
   // 覆盖保存整张表
   saveSheet: (filePath: string, rows: string[][]) => ipcRenderer.invoke('save-sheet', { filePath, rows }),
+  // 在文件管理器中打开文件所在文件夹并选中
+  revealFile: (filePath: string) => ipcRenderer.invoke('reveal-file', filePath),
+  // 列出某文件可用的备份版本（新 → 旧）
+  listBackups: (filePath: string) => ipcRenderer.invoke('list-backups', filePath),
+  // 恢复某文件最近一份备份
+  restoreBackup: (filePath: string) => ipcRenderer.invoke('restore-backup', filePath),
   // 获取最近修改历史
   getHistory: () => ipcRenderer.invoke('get-history'),
   // 清空最近修改历史
   clearHistory: () => ipcRenderer.invoke('clear-history'),
+  // 获取设置
+  getSettings: () => ipcRenderer.invoke('get-settings'),
+  // 保存设置
+  saveSettings: (settings: {
+    aiConfig?: { baseURL?: string; apiKey?: string; model?: string; temperature?: number }
+    imageDir?: string
+    prompt?: string
+  }) => ipcRenderer.invoke('save-settings', settings),
+  // 选择图片目录
+  selectImageDirectory: () => ipcRenderer.invoke('select-image-directory'),
+  // 列出图片目录中的图片
+  listImages: (dir?: string) => ipcRenderer.invoke('list-images', dir),
+  // 读取图片为 base64
+  readImageBase64: (imagePath: string) => ipcRenderer.invoke('read-image-base64', imagePath),
+  // AI 识别小票
+  aiRecognize: (imagePath: string) => ipcRenderer.invoke('ai-recognize', imagePath),
+  // 读取某 Excel 已自动填入过的图片列表（去重用）
+  getApplied: (filePath: string) => ipcRenderer.invoke('get-applied', filePath),
+  // 记录某张图片已自动填入
+  addApplied: (filePath: string, imagePath: string) => ipcRenderer.invoke('add-applied', filePath, imagePath),
+  // 打开独立的小票识图窗口
+  openImageWindow: () => ipcRenderer.invoke('open-image-window'),
+  // 订阅主进程事件（返回取消订阅函数）；用于接收 recognized-persons / apply-recognized-rows
+  on: (channel: string, listener: (...args: unknown[]) => void) => {
+    const sub = (_e: unknown, ...args: unknown[]) => listener(...args)
+    ipcRenderer.on(channel, sub)
+    return () => ipcRenderer.removeListener(channel, sub)
+  },
+  // 上报识别出的人名（主进程转发给主窗口，用于左侧列表置顶）
+  reportPersons: (persons: string[]) => ipcRenderer.send('image:recognized-persons', persons),
+  // 把识别结果回填到主窗口当前录入网格
+  applyToMain: (rows: AIRecognizedRow[]) => ipcRenderer.send('image:apply-rows', rows),
 })

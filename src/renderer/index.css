@@ -818,6 +818,17 @@ body {
   color: #2c8a4a;
 }
 
+/* AI 图片识别自动预录的行：暖黄色高亮，与手输（白底）区分；修改后自动转白 */
+.row-auto td {
+  background: #fff7cc;
+}
+.row-auto .cell {
+  color: #8a6d00;
+}
+.row-auto .rownum {
+  background: #ffe699;
+}
+
 /* 单元格内容：单行显示，超出用省略号，避免列被撑高换行（悬停看完整内容） */
 .cell {
   padding: 2px 4px;
@@ -1018,5 +1029,365 @@ body {
 }
 .col-resize-handle:hover {
   background: #409eff;
+}
+
+/* 顶部操作按钮组 */
+.app-top-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* 按钮激活态 */
+.btn.is-active {
+  background: #ecf5ff;
+  color: #409eff;
+  border-color: #409eff;
+}
+
+/* ============ 右侧小票图片 / AI 面板 ============ */
+.sheet-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: row;
+  gap: 10px;
+  overflow: hidden;
+}
+
+.image-panel {
+  flex: 0 0 360px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: #fff;
+  border: 1px solid #e4e7ed;
+  border-radius: 6px;
+  padding: 10px;
+  overflow: hidden;
+}
+
+.image-panel-header {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.image-panel-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #303133;
+}
+.image-panel-dir {
+  font-size: 11px;
+  color: #909399;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.image-toolbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.image-select {
+  flex: 1;
+  min-width: 0;
+  padding: 5px 8px;
+  font-size: 12px;
+  border: 1px solid #dcdfe6;
+  border-radius: 4px;
+  background: #fff;
+}
+
+.image-preview-wrap {
+  flex: 1 1 auto;
+  min-height: 120px;
+  background: #f7f8fa;
+  border: 1px solid #ebeef5;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+.image-preview {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  transition: transform 0.2s;
+}
+.image-empty {
+  color: #909399;
+  font-size: 12px;
+  text-align: center;
+  padding: 20px;
+}
+
+.ai-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ai-hint {
+  font-size: 11px;
+  color: #909399;
+}
+
+.image-status {
+  font-size: 12px;
+  color: #67c23a;
+  word-break: break-all;
+}
+.image-status.error {
+  color: #f56c6c;
+}
+
+.ai-results {
+  flex: 0 0 auto;
+  max-height: 200px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border-top: 1px solid #ebeef5;
+  padding-top: 8px;
+}
+.ai-results-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+  font-weight: 600;
+  color: #303133;
+}
+.ai-result-actions {
+  display: flex;
+  gap: 6px;
+}
+.ai-results-table-wrap {
+  flex: 1;
+  overflow: auto;
+  border: 1px solid #ebeef5;
+  border-radius: 4px;
+}
+.ai-results-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+  color: #303133;
+}
+.ai-results-table th,
+.ai-results-table td {
+  border: 1px solid #ebeef5;
+  padding: 3px 5px;
+  white-space: nowrap;
+}
+.ai-results-table th {
+  background: #f2f2f2;
+  font-weight: 600;
+  position: sticky;
+  top: 0;
+}
+
+/* ============ 设置弹窗 ============ */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  background: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.modal-panel {
+  background: #fff;
+  border-radius: 8px;
+  width: 560px;
+  max-width: 92vw;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.22);
+}
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid #ebeef5;
+}
+.modal-header h3 {
+  font-size: 15px;
+  font-weight: 600;
+  color: #303133;
+  margin: 0;
+}
+.modal-close {
+  border: none;
+  background: transparent;
+  font-size: 20px;
+  color: #909399;
+  cursor: pointer;
+  line-height: 1;
+}
+.modal-close:hover { color: #f56c6c; }
+
+.modal-body {
+  padding: 16px 18px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding: 12px 18px;
+  border-top: 1px solid #ebeef5;
+}
+
+.form-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.form-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #303133;
+  margin-bottom: 2px;
+}
+.form-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: #606266;
+}
+.form-row.dir-row {
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
+}
+.form-row input[type="text"],
+.form-row input[type="password"] {
+  padding: 6px 10px;
+  font-size: 13px;
+  border: 1px solid #dcdfe6;
+  border-radius: 4px;
+  outline: none;
+}
+.form-row input[type="text"]:focus,
+.form-row input[type="password"]:focus {
+  border-color: #409eff;
+}
+.form-row input[type="range"] {
+  width: 100%;
+}
+.dir-input {
+  flex: 1;
+  background: #f5f7fa;
+  color: #606266;
+}
+.prompt-textarea {
+  width: 100%;
+  padding: 8px 10px;
+  font-size: 12px;
+  border: 1px solid #dcdfe6;
+  border-radius: 4px;
+  resize: vertical;
+  font-family: inherit;
+  line-height: 1.5;
+}
+.form-hint {
+  font-size: 11px;
+  color: #909399;
+}
+.modal-status {
+  font-size: 12px;
+  color: #67c23a;
+  min-height: 18px;
+}
+.modal-status.error {
+  color: #f56c6c;
+}
+
+/* ============ 独立"小票识图"窗口 ============ */
+/* 让 image-panel 填满整个独立窗口（覆盖内嵌时的固定 360px 宽度） */
+.image-window {
+  position: fixed;
+  inset: 0;
+  padding: 12px;
+  background: #f5f6f8;
+  overflow: hidden;
+}
+.image-window .image-panel {
+  flex: 1 1 auto;
+  width: 100%;
+  height: 100%;
+}
+
+/* 左侧文件列表：识图命中的文件置顶并高亮 */
+.file-item.is-hit {
+  border-left: 3px solid #409eff;
+  background: #f0f7ff;
+}
+.file-item.is-hit .file-name {
+  color: #1d6fd0;
+  font-weight: 600;
+}
+.hit-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 0 6px;
+  font-size: 10px;
+  line-height: 16px;
+  color: #fff;
+  background: #409eff;
+  border-radius: 8px;
+  vertical-align: middle;
+}
+.hit-group-header {
+  list-style: none;
+  padding: 6px 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #1d6fd0;
+  background: #eaf3ff;
+  border-radius: 4px;
+}
+
+/* 识图窗口内：已识别人名标签 */
+.person-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+.person-chips-label {
+  color: #909399;
+}
+.person-chip {
+  padding: 1px 8px;
+  font-size: 12px;
+  color: #1d6fd0;
+  background: #eaf3ff;
+  border: 1px solid #b3d6ff;
+  border-radius: 10px;
+}
+.btn-link {
+  background: transparent;
+  border: none;
+  color: #909399;
+  text-decoration: underline;
+  cursor: pointer;
+  padding: 1px 4px;
+}
+.btn-link:hover {
+  color: #f56c6c;
 }
 

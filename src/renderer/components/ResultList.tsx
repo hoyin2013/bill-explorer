@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { ElectronAPI, FileEntry, PreviewRow } from '../types'
+import { parsePersonFromFilename, personMatches } from '../utils/person'
 
 interface Props {
   api: ElectronAPI
@@ -9,6 +10,7 @@ interface Props {
   query: string
   loading: boolean
   activeFile: FileEntry | null
+  recognizedPersons?: string[]
   onOpen: (index: number) => void
   onOpenInExcel?: (index: number) => void
 }
@@ -35,6 +37,7 @@ export function ResultList({
   query,
   loading,
   activeFile,
+  recognizedPersons = [],
   onOpen,
   onOpenInExcel,
 }: Props) {
@@ -85,6 +88,38 @@ export function ResultList({
   const wrapRef = useRef<HTMLDivElement | null>(null)
   const previewTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  // ---- 右键菜单（文件列表项） ----
+  const [ctxMenu, setCtxMenu] = useState<{ x: number; y: number; index: number } | null>(null)
+
+  function handleItemContextMenu(e: React.MouseEvent, index: number) {
+    e.preventDefault()
+    e.stopPropagation()
+    const MW = 200
+    const MH = 132
+    const x = Math.min(e.clientX, window.innerWidth - MW - 8)
+    const y = Math.min(e.clientY, window.innerHeight - MH - 8)
+    setCtxMenu({ x: Math.max(4, x), y: Math.max(4, y), index })
+  }
+
+  // 菜单打开时，点击别处 / 滚动 / Esc / 失焦即关闭
+  useEffect(() => {
+    if (!ctxMenu) return
+    const close = () => setCtxMenu(null)
+    const onKey = (ev: KeyboardEvent) => { if (ev.key === 'Escape') close() }
+    window.addEventListener('mousedown', close)
+    window.addEventListener('resize', close)
+    window.addEventListener('blur', close)
+    window.addEventListener('keydown', onKey)
+    window.addEventListener('scroll', close, true)
+    return () => {
+      window.removeEventListener('mousedown', close)
+      window.removeEventListener('resize', close)
+      window.removeEventListener('blur', close)
+      window.removeEventListener('keydown', onKey)
+      window.removeEventListener('scroll', close, true)
+    }
+  }, [ctxMenu])
 
   function getPos(index: number) {
     const item = wrapRef.current?.querySelector(`[data-file-idx="${index}"]`) as HTMLElement
@@ -161,6 +196,20 @@ export function ResultList({
     return () => window.removeEventListener('scroll', onScroll, true)
   }, [preview, files])
 
+  // 把"识图识别出的人名"对应的 Excel 排到最上方；其余文件保持原顺序
+  const display = useMemo(() => {
+    if (!recognizedPersons.length) {
+      return files.map((file, idx) => ({ file, idx, hit: false }))
+    }
+    const matched: Array<{ file: FileEntry; idx: number; hit: boolean }> = []
+    const others: Array<{ file: FileEntry; idx: number; hit: boolean }> = []
+    files.forEach((file, idx) => {
+      const hit = recognizedPersons.some((p) => personMatches(parsePersonFromFilename(file.fileName), p))
+      ;(hit ? matched : others).push({ file, idx, hit })
+    })
+    return [...matched, ...others]
+  }, [files, recognizedPersons])
+
   if (!files.length && totalCount === 0 && !loading) {
     return (
       <div className="empty-state">
@@ -191,24 +240,34 @@ export function ResultList({
         </button>
       </div>
       <ul className="file-list">
-        {files.map((f, i) => (
+        {recognizedPersons.length > 0 && display.some((d) => d.hit) && (
+          <li className="hit-group-header" key="__hit">
+            识图命中 {display.filter((d) => d.hit).length} 个（按识别人名置顶）
+          </li>
+        )}
+        {display.map(({ file, idx, hit }) => (
           <li
-            data-file-idx={i}
+            data-file-idx={idx}
             className={
-              f.filePath === activeFile?.filePath ? 'file-item is-active' : 'file-item'
+              (file.filePath === activeFile?.filePath ? 'file-item is-active' : 'file-item') +
+              (hit ? ' is-hit' : '')
             }
-            key={f.filePath + i}
-            title="单击打开录入，双击用 Excel 打开"
-            onClick={() => handleClick(i)}
+            key={file.filePath}
+            title="单击打开录入，双击用 Excel 打开，右键更多操作"
+            onClick={() => handleClick(idx)}
             onDoubleClick={(e) => {
               e.stopPropagation()
-              handleDoubleClick(i)
+              handleDoubleClick(idx)
             }}
-            onMouseEnter={() => handleItemEnter(i)}
+            onContextMenu={(e) => handleItemContextMenu(e, idx)}
+            onMouseEnter={() => handleItemEnter(idx)}
             onMouseLeave={handleItemLeave}
           >
-            <div className="file-name">{f.fileName}</div>
-            <div className="file-path">{f.filePath}</div>
+            <div className="file-name">
+              {file.fileName}
+              {hit && <span className="hit-badge">命中</span>}
+            </div>
+            <div className="file-path">{file.filePath}</div>
           </li>
         ))}
       </ul>
@@ -274,6 +333,29 @@ export function ResultList({
           )}
         </div>
       )}
+
+      {ctxMenu && (() => {
+        const f = files[ctxMenu.index]
+        if (!f) return null
+        const item = (label: string, hint: string, fn: () => void) => (
+          <button
+            className="ctx-item"
+            onMouseDown={(e) => e.stopPropagation()}
+            onClick={() => { setCtxMenu(null); fn() }}
+          >
+            <span>{label}</span>
+            {hint && <span className="ctx-hint">{hint}</span>}
+          </button>
+        )
+        return (
+          <div className="ctx-menu" style={{ left: ctxMenu.x, top: ctxMenu.y }}>
+            {item('打开文件所在文件夹', '', () => { void api.revealFile(f.filePath) })}
+            {item('用 Excel 打开', '', () => { onOpenInExcel?.(ctxMenu.index) })}
+            <div className="ctx-sep" />
+            {item('打开录入', '单击', () => { onOpen(ctxMenu.index) })}
+          </div>
+        )
+      })()}
     </div>
   )
 }

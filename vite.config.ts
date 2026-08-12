@@ -1,6 +1,6 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
-import path from 'path'
+import { resolve } from 'path'
 
 export default defineConfig({
   plugins: [react()],
@@ -8,7 +8,7 @@ export default defineConfig({
   base: './',
   resolve: {
     alias: {
-      '@': path.resolve(__dirname, './src/renderer'),
+      '@': resolve(__dirname, './src/renderer'),
     },
   },
   server: {
@@ -16,5 +16,12 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist',
+    rollupOptions: {
+      // 多页构建：主窗口 + 独立的小票识图窗口
+      input: {
+        main: resolve(__dirname, 'index.html'),
+        image: resolve(__dirname, 'image.html'),
+      },
+    },
   },
 })

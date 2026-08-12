@@ -1,6 +1,6 @@
-# BillExplorer 打包文档
+# 账单录入器 打包文档
 
-本文档详细说明 BillExplorer（账单查找器）从源码到生成可分发安装包的完整流程。
+本文档详细说明 账单录入器（BillExplorer）从源码到生成可分发安装包的完整流程。
 
 ---
 
@@ -190,7 +190,7 @@ release/
 {
   "build": {
     "appId": "com.bill-explorer.app",
-    "productName": "BillExplorer",
+    "productName": "账单录入器",
     "directories": {
       "output": "release"
     },

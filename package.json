@@ -38,7 +38,7 @@
   },
   "build": {
     "appId": "com.bill-explorer.app",
-    "productName": "BillExplorer",
+    "productName": "账单录入器",
     "directories": {
       "output": "release"
     },

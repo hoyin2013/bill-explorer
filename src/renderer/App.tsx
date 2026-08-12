@@ -6,6 +6,7 @@ import { ResultList } from './components/ResultList'
 import { SheetGrid } from './components/SheetGrid'
 import { ErrorMessage } from './components/ErrorMessage'
 import { HistoryList } from './components/HistoryList'
+import { SettingsModal } from './components/SettingsModal'
 
 // 安全检查：electronAPI 来自 preload，若为 undefined 说明 Electron 未正确加载 preload
 const api = window.electronAPI
@@ -14,7 +15,7 @@ const api = window.electronAPI
 function BrokenState() {
   return (
     <div className="app">
-      <h1 className="app-title">账单文件查找器</h1>
+      <h1 className="app-title">账单录入器</h1>
       <div className="error-msg" style={{ margin: '20px 0' }}>
         <span className="error-icon">!</span>
         <span>
@@ -55,6 +56,12 @@ function AppInner({ api }: { api: ElectronAPI }) {
   // ---- 最近修改历史 ----
   const [history, setHistory] = useState<HistoryRecord[]>([])
 
+  // ---- AI / 图片设置 ----
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [imageDir, setImageDir] = useState('')
+  // 识图窗口上报的"已识别人名"，用于把左侧列表中对应 Excel 置顶
+  const [recognizedPersons, setRecognizedPersons] = useState<string[]>([])
+
   // ---- 左侧查找区宽度（px），可拖动中间分隔条调整（参照"最近修改"窗口的可调设计） ----
   const [sideWidth, setSideWidth] = useState(320)
   const splitDragRef = useRef<{ startX: number; startW: number } | null>(null)
@@ -75,11 +82,34 @@ function AppInner({ api }: { api: ElectronAPI }) {
     return () => window.removeEventListener('focus', onFocus)
   }, [activeFile])
 
-  // 软件启动时自动加载上次持久化的工作目录
+  // 软件启动时自动加载上次持久化的工作目录和设置
   useEffect(() => {
     loadWorkDir()
     refreshHistory()
+    loadSettings()
   }, [])
+
+  // 接收独立识图窗口上报的人名，用于把左侧列表对应 Excel 置顶
+  useEffect(() => {
+    const off = api.on('recognized-persons', (persons) => {
+      setRecognizedPersons(Array.isArray(persons) ? (persons as string[]) : [])
+    })
+    return off
+  }, [api])
+
+  async function loadSettings() {
+    try {
+      const s = await api.getSettings()
+      setImageDir(s.imageDir || '')
+    } catch {
+      // ignore
+    }
+  }
+
+  async function onChooseImageDir() {
+    const dir = await api.selectImageDirectory()
+    if (dir) setImageDir(dir)
+  }
 
   // 加载最近修改历史
   async function refreshHistory() {
@@ -284,7 +314,7 @@ function AppInner({ api }: { api: ElectronAPI }) {
   return (
     <div className="app">
       <div className="app-top">
-        <h1 className="app-title">账单查找器</h1>
+        <h1 className="app-title">账单录入器</h1>
         <DirectoryBar
           workDir={workDir}
           status={status}
@@ -293,6 +323,17 @@ function AppInner({ api }: { api: ElectronAPI }) {
           onRefresh={onRefresh}
           onOpenDir={onOpenDir}
         />
+        <div className="app-top-actions">
+          <button className="btn btn-outline" onClick={onChooseImageDir} title="选择小票图片所在目录">
+            图片目录
+          </button>
+          <button className="btn btn-outline" onClick={() => api.openImageWindow()} title="打开独立的小票识图窗口（不影响录入）">
+            AI 识图窗口
+          </button>
+          <button className="btn btn-outline" onClick={() => setSettingsOpen(true)} title="配置 AI 接口、图片目录、识别提示词">
+            AI 设置
+          </button>
+        </div>
       </div>
 
       <div className="app-body">
@@ -314,6 +355,7 @@ function AppInner({ api }: { api: ElectronAPI }) {
             query={query}
             loading={loading}
             activeFile={activeFile}
+            recognizedPersons={recognizedPersons}
             onOpen={onOpen}
             onOpenInExcel={onOpenInExcel}
           />
@@ -351,6 +393,13 @@ function AppInner({ api }: { api: ElectronAPI }) {
           )}
         </main>
       </div>
+
+      <SettingsModal
+        api={api}
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        onSaved={loadSettings}
+      />
     </div>
   )
 }
