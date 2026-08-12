@@ -58,7 +58,7 @@ function AppInner({ api }: { api: ElectronAPI }) {
 
   // ---- AI / 图片设置 ----
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [imageDir, setImageDir] = useState('')
+  
   // 识图窗口上报的"已识别人名"，用于把左侧列表中对应 Excel 置顶
   const [recognizedPersons, setRecognizedPersons] = useState<string[]>([])
 
@@ -97,21 +97,16 @@ function AppInner({ api }: { api: ElectronAPI }) {
     return off
   }, [api])
 
-  async function loadSettings() {
+    async function loadSettings() {
     try {
-      const s = await api.getSettings()
-      setImageDir(s.imageDir || '')
+      await api.getSettings()
     } catch {
       // ignore
     }
   }
 
-  async function onChooseImageDir() {
-    const dir = await api.selectImageDirectory()
-    if (dir) setImageDir(dir)
-  }
 
-  // 加载最近修改历史
+    // 加载最近修改历史
   async function refreshHistory() {
     try {
       setHistory((await api.getHistory()) || [])
@@ -324,9 +319,6 @@ function AppInner({ api }: { api: ElectronAPI }) {
           onOpenDir={onOpenDir}
         />
         <div className="app-top-actions">
-          <button className="btn btn-outline" onClick={onChooseImageDir} title="选择小票图片所在目录">
-            图片目录
-          </button>
           <button className="btn btn-outline" onClick={() => api.openImageWindow()} title="打开独立的小票识图窗口（不影响录入）">
             AI 识图窗口
           </button>

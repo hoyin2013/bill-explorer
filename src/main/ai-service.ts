@@ -129,75 +129,102 @@ export async function recognizeReceipt(
 
   const baseURL = config.baseURL.replace(/\/$/, '')
   const url = `${baseURL}/chat/completions`
-  const body = {
-    model: config.model,
-    temperature: typeof config.temperature === 'number' ? config.temperature : 0.2,
-    max_tokens: 4096,
-    messages: [
-      {
-        role: 'system',
-        content: '你是一位严谨的中文票据识别助手，只输出合法 JSON。',
-      },
-      {
-        role: 'user',
-        content: [
-          { type: 'text', text: prompt || DEFAULT_PROMPT },
-          {
-            type: 'image_url',
-            image_url: { url: `data:image/jpeg;base64,${imageBase64}` },
-          },
-        ],
-      },
-    ],
-  }
 
-  let responseText = ''
-  try {
-    const res = (await getFetch()(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${config.apiKey}`,
-      },
-      body: JSON.stringify(body),
-    })) as { ok: boolean; status: number; statusText: string; text: () => Promise<string> }
-    responseText = await res.text()
-    if (!res.ok) {
-      return { error: true, message: `AI 接口错误 ${res.status}：${responseText.slice(0, 300)}` }
+  // 部分 OpenAI 兼容 API 不支持标准 image_url 内容格式（如：unknown variant `image_url`, expected `text`）。
+  // 按兼容性从高到低尝试多种图片内容格式，服务端 400 拒绝后自动重试下一种。
+  const dataUri = `data:image/jpeg;base64,${imageBase64}`
+  const imageContentVariants = [
+    { type: 'image_url', image_url: { url: dataUri } },          // 标准 OpenAI 格式
+    { type: 'image_url', image_url: dataUri },                    // 部分 API 期望 image_url 为字符串
+    { type: 'image', image: dataUri },                            // 部分本地/代理 API 使用 image 类型
+    { type: 'image', image: imageBase64 },                        // 部分 API 使用 image 类型 + 纯 base64
+  ]
+
+  let lastError = ''
+  for (let i = 0; i < imageContentVariants.length; i++) {
+    const body = {
+      model: config.model,
+      temperature: typeof config.temperature === 'number' ? config.temperature : 0.2,
+      max_tokens: 4096,
+      messages: [
+        {
+          role: 'system',
+          content: '你是一位严谨的中文票据识别助手，只输出合法 JSON。',
+        },
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: prompt || DEFAULT_PROMPT },
+            imageContentVariants[i],
+          ],
+        },
+      ],
     }
-  } catch (err) {
-    return { error: true, message: '请求 AI 接口失败：' + (err instanceof Error ? err.message : '未知错误') }
-  }
 
-  let responseJson: unknown
-  try {
-    responseJson = JSON.parse(responseText)
-  } catch {
-    return { error: true, message: 'AI 接口返回非 JSON：' + responseText.slice(0, 300) }
-  }
-
-  const data = responseJson as Record<string, unknown>
-  const choices = data.choices as Array<Record<string, unknown>> | undefined
-  const first = choices && choices[0]
-  const message = first?.message as Record<string, unknown> | undefined
-  const content = message?.content
-  if (typeof content !== 'string') {
-    return { error: true, message: 'AI 接口返回内容为空或格式异常' }
-  }
-
-  let parsed: unknown
-  try {
-    parsed = extractJson(content)
-  } catch (err) {
-    return {
-      error: true,
-      message: 'AI 返回无法解析为 JSON：' + (err instanceof Error ? err.message : '') + '\n原始内容：' + content.slice(0, 400),
+    let responseText = ''
+    try {
+      const res = (await getFetch()(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${config.apiKey}`,
+        },
+        body: JSON.stringify(body),
+      })) as { ok: boolean; status: number; statusText: string; text: () => Promise<string> }
+      responseText = await res.text()
+      if (!res.ok) {
+        // 若服务端拒绝当前图片格式（常见 400：unknown variant image_url），
+        // 记录错误并尝试下一种格式。其他错误直接返回。
+        const rejected = res.status === 400 &&
+          /unknown variant/i.test(responseText) &&
+          !/unknown variant `text`/.test(responseText)
+        if (rejected) {
+          lastError = `AI 接口错误 ${res.status}：${responseText.slice(0, 200)}`
+          continue
+        }
+        return { error: true, message: `AI 接口错误 ${res.status}：${responseText.slice(0, 300)}` }
+      }
+    } catch (err) {
+      return { error: true, message: '请求 AI 接口失败：' + (err instanceof Error ? err.message : '未知错误') }
     }
+
+    // 成功响应，解析结果
+    let responseJson: unknown
+    try {
+      responseJson = JSON.parse(responseText)
+    } catch {
+      return { error: true, message: 'AI 接口返回非 JSON：' + responseText.slice(0, 300) }
+    }
+
+    const data = responseJson as Record<string, unknown>
+    const choices = data.choices as Array<Record<string, unknown>> | undefined
+    const first = choices && choices[0]
+    const message = first?.message as Record<string, unknown> | undefined
+    const content = message?.content
+    if (typeof content !== 'string') {
+      return { error: true, message: 'AI 接口返回内容为空或格式异常' }
+    }
+
+    let parsed: unknown
+    try {
+      parsed = extractJson(content)
+    } catch (err) {
+      return {
+        error: true,
+        message: 'AI 返回无法解析为 JSON：' + (err instanceof Error ? err.message : '') + '\n原始内容：' + content.slice(0, 400),
+      }
+    }
+
+    const rows = normalizeRows(parsed)
+    if (rows.length === 0) {
+      return { error: true, message: 'AI 未识别出任何小票记录，请检查图片清晰度或提示词。' }
+    }
+    return { rows }
   }
 
-  const rows = normalizeRows(parsed)
-  if (rows.length === 0) {
-    return { error: true, message: 'AI 未识别出任何小票记录，请检查图片清晰度或提示词。' }
+  // 所有格式都被服务端拒绝
+  return {
+    error: true,
+    message: `AI 接口不支持图片输入（尝试了 ${imageContentVariants.length} 种格式均被拒绝）。\n${lastError}\n请检查：① 使用支持 vision 的模型；② 确认 Base URL 为正确的 OpenAI 兼容视觉接口。`,
   }
-  return { rows }
 }

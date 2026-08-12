@@ -1204,9 +1204,9 @@ body {
 .modal-panel {
   background: #fff;
   border-radius: 8px;
-  width: 560px;
+  width: 620px;
   max-width: 92vw;
-  max-height: 90vh;
+  max-height: 92vh;
   display: flex;
   flex-direction: column;
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.22);
@@ -1237,6 +1237,8 @@ body {
 .modal-body {
   padding: 16px 18px;
   overflow-y: auto;
+  /* 留出 header ~60px + footer ~70px 空间，保证内容可滚动但按钮始终可见 */
+  max-height: calc(92vh - 130px);
   display: flex;
   flex-direction: column;
   gap: 16px;
@@ -1245,8 +1247,9 @@ body {
   display: flex;
   justify-content: flex-end;
   gap: 10px;
-  padding: 12px 18px;
+  padding: 14px 18px;
   border-top: 1px solid #ebeef5;
+  flex-shrink: 0;
 }
 
 .form-section {

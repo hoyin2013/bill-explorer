@@ -35,13 +35,6 @@ export function SettingsModal({ api, open, onClose, onSaved }: Props) {
 
   if (!open) return null
 
-  async function onChooseImageDir() {
-    const dir = await api.selectImageDirectory()
-    if (dir) {
-      setSettings((prev) => ({ ...prev, imageDir: dir }))
-    }
-  }
-
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault()
     setLoading(true)
@@ -138,10 +131,14 @@ export function SettingsModal({ api, open, onClose, onSaved }: Props) {
                   value={settings.imageDir || '未设置'}
                   className="dir-input"
                 />
-                <button type="button" className="btn" onClick={onChooseImageDir}>
-                  选择目录
+                <button type="button" className="btn" onClick={() => {
+                  api.openImageWindow()
+                  onClose()
+                }}>
+                  前往设置
                 </button>
               </div>
+              <div className="form-hint">图片目录在「AI 识图窗口」中设置，目录中非图片文件会自动过滤。</div>
             </div>
 
             <div className="form-section">
