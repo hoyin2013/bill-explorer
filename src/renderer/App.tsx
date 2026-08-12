@@ -97,7 +97,7 @@ function AppInner({ api }: { api: ElectronAPI }) {
     return off
   }, [api])
 
-    async function loadSettings() {
+  async function loadSettings() {
     try {
       await api.getSettings()
     } catch {
@@ -105,8 +105,7 @@ function AppInner({ api }: { api: ElectronAPI }) {
     }
   }
 
-
-    // 加载最近修改历史
+  // 加载最近修改历史
   async function refreshHistory() {
     try {
       setHistory((await api.getHistory()) || [])
