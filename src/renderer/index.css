@@ -1112,18 +1112,111 @@ body {
   align-items: center;
   justify-content: center;
   overflow: hidden;
+  user-select: none;
 }
 .image-preview {
   max-width: 100%;
   max-height: 100%;
   object-fit: contain;
-  transition: transform 0.2s;
+  transform-origin: center center;
+  will-change: transform;
+  user-select: none;
+  -webkit-user-drag: none;
 }
 .image-empty {
   color: #909399;
   font-size: 12px;
   text-align: center;
   padding: 20px;
+}
+.image-zoom {
+  font-size: 12px;
+  color: #606266;
+  margin-left: 2px;
+}
+.image-preview-hint {
+  font-size: 11px;
+  color: #a8abb2;
+  text-align: center;
+}
+
+/* 图片列表：独立窗口内的可见列表（替换原下拉框） */
+.image-content {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: row;
+  gap: 10px;
+}
+.image-list-side {
+  flex: 0 0 170px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  border: 1px solid #ebeef5;
+  border-radius: 6px;
+  background: #fff;
+  overflow: hidden;
+}
+.image-list-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: #303133;
+  padding: 6px 8px;
+  border-bottom: 1px solid #ebeef5;
+  background: #fafafa;
+}
+.image-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+}
+.image-list-empty {
+  padding: 14px 10px;
+  font-size: 12px;
+  color: #909399;
+  text-align: center;
+}
+.image-list-item {
+  text-align: left;
+  border: none;
+  background: transparent;
+  padding: 7px 8px;
+  font-size: 12px;
+  color: #303133;
+  cursor: pointer;
+  border-bottom: 1px solid #f2f2f2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.image-list-item:hover {
+  background: #f5f7fa;
+}
+.image-list-item.selected {
+  background: #ecf5ff;
+  color: #1d6fd0;
+  font-weight: 600;
+  border-left: 3px solid #409eff;
+  padding-left: 5px;
+}
+.image-main-area {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.image-current-name {
+  font-size: 12px;
+  color: #606266;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .ai-actions {
@@ -1146,13 +1239,14 @@ body {
 }
 
 .ai-results {
-  flex: 0 0 auto;
-  max-height: 200px;
+  flex: 1 1 auto;
+  max-height: 320px;
   display: flex;
   flex-direction: column;
   gap: 6px;
   border-top: 1px solid #ebeef5;
   padding-top: 8px;
+  min-height: 0;
 }
 .ai-results-header {
   display: flex;
@@ -1189,6 +1283,63 @@ body {
   font-weight: 600;
   position: sticky;
   top: 0;
+}
+/* 可编辑的结果单元格 */
+.ai-results-table .ai-cell-input {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  padding: 2px 4px;
+  font-size: 11px;
+  color: #303133;
+  background: #fff;
+  outline: none;
+}
+.ai-results-table .ai-cell-input:focus {
+  border-color: #409eff;
+  background: #fff;
+}
+/* 行删除列 */
+.ai-results-table .ai-col-del {
+  width: 22px;
+  text-align: center;
+  padding: 2px;
+}
+.ai-results-table .ai-row-del {
+  border: none;
+  background: transparent;
+  color: #c0c4cc;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+}
+.ai-results-table .ai-row-del:hover {
+  color: #f56c6c;
+}
+/* 来源列 */
+.ai-results-table .ai-source {
+  color: #909399;
+  max-width: 130px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* 停止扫描按钮（警示色） */
+.btn-warn {
+  background: #e6a23c;
+  border-color: #e6a23c;
+  color: #fff;
+}
+.btn-warn:hover {
+  background: #cf9240;
+  border-color: #cf9240;
+}
+.btn-warn:disabled {
+  background: #f3d9a8;
+  border-color: #f3d9a8;
+  color: #fff;
 }
 
 /* ============ 设置弹窗 ============ */

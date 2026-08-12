@@ -29,6 +29,8 @@ export interface AIRecognizedRow {
   amount?: string | number
   person?: string
   remark?: string
+  /** 仅前端使用：记录该结果来自哪张图片（多图扫描时便于核对），AI 不会返回此字段 */
+  source?: string
 }
 
 // 应用设置

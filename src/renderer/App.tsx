@@ -61,6 +61,9 @@ function AppInner({ api }: { api: ElectronAPI }) {
   
   // 识图窗口上报的"已识别人名"，用于把左侧列表中对应 Excel 置顶
   const [recognizedPersons, setRecognizedPersons] = useState<string[]>([])
+  // 当前是否在主窗口打开了录入面板（供"识图回填"反馈判断）
+  const activeFileRef = useRef<FileEntry | null>(null)
+  activeFileRef.current = activeFile
 
   // ---- 左侧查找区宽度（px），可拖动中间分隔条调整（参照"最近修改"窗口的可调设计） ----
   const [sideWidth, setSideWidth] = useState(320)
@@ -93,6 +96,18 @@ function AppInner({ api }: { api: ElectronAPI }) {
   useEffect(() => {
     const off = api.on('recognized-persons', (persons) => {
       setRecognizedPersons(Array.isArray(persons) ? (persons as string[]) : [])
+    })
+    return off
+  }, [api])
+
+  // 识图窗口点"填入当前录入"时，若主窗口尚未打开任何账单文件，给出引导提示
+  useEffect(() => {
+    const off = api.on('apply-recognized-rows', (rows) => {
+      if (!activeFileRef.current) {
+        const n = Array.isArray(rows) ? rows.length : 0
+        setMemoStatus(`已收到识图窗口的 ${n} 条识别结果，但左侧还没打开目标 Excel。请先选中一个文件进入录入，再点网格即可核对后保存。`)
+        setTimeout(() => setMemoStatus(''), 5000)
+      }
     })
     return off
   }, [api])
