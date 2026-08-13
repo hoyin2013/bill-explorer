@@ -4,6 +4,7 @@ import { filterFiles } from './utils'
 import { DirectoryBar } from './components/DirectoryBar'
 import { ResultList } from './components/ResultList'
 import { SheetGrid } from './components/SheetGrid'
+import { ImageWindow } from './components/ImageWindow'
 import { ErrorMessage } from './components/ErrorMessage'
 import { HistoryList } from './components/HistoryList'
 import { SettingsModal } from './components/SettingsModal'
@@ -37,7 +38,25 @@ function BrokenState() {
 export default function App() {
   if (!api) return <BrokenState />
 
-  return <AppInner api={api} />
+  // 通过 ?detached=image 查询参数识别「独立识图窗口」模式：只渲染 ImageWindow 全屏
+  const detached = new URLSearchParams(window.location.search).get('detached') === 'image'
+  return detached ? <DetachedImageApp api={api} /> : <AppInner api={api} />
+}
+
+// 独立「小票识图」窗口：仅渲染 ImageWindow，并带「合并回主窗口」能力
+function DetachedImageApp({ api }: { api: ElectronAPI }) {
+  return (
+    <div className="detached-root">
+      <ImageWindow
+        api={api}
+        detached
+        onAttach={() => {
+          api.attachImageDetached()
+          window.close()
+        }}
+      />
+    </div>
+  )
 }
 
 function AppInner({ api }: { api: ElectronAPI }) {
@@ -58,7 +77,12 @@ function AppInner({ api }: { api: ElectronAPI }) {
 
   // ---- AI / 图片设置 ----
   const [settingsOpen, setSettingsOpen] = useState(false)
-  
+
+  // 右侧"小票识图"面板是否展开 + 其宽度（px），可拖动分隔条调整
+  const [showImagePanel, setShowImagePanel] = useState(true)
+  const [imgWidth, setImgWidth] = useState(360)
+  const imgSplitDragRef = useRef<{ startX: number; startW: number } | null>(null)
+
   // 识图窗口上报的"已识别人名"，用于把左侧列表中对应 Excel 置顶
   const [recognizedPersons, setRecognizedPersons] = useState<string[]>([])
   // 当前是否在主窗口打开了录入面板（供"识图回填"反馈判断）
@@ -66,7 +90,7 @@ function AppInner({ api }: { api: ElectronAPI }) {
   activeFileRef.current = activeFile
 
   // ---- 左侧查找区宽度（px），可拖动中间分隔条调整（参照"最近修改"窗口的可调设计） ----
-  const [sideWidth, setSideWidth] = useState(320)
+  const [sideWidth, setSideWidth] = useState(200)
   const splitDragRef = useRef<{ startX: number; startW: number } | null>(null)
 
   const searchRef = useRef<HTMLInputElement>(null)
@@ -100,14 +124,6 @@ function AppInner({ api }: { api: ElectronAPI }) {
     return off
   }, [api])
 
-  // 关闭识图窗口时，清空主窗口左侧的文件名搜索框（避免残留旧的检索词）
-  useEffect(() => {
-    const off = api.on('image-window-closed', () => {
-      setQuery('')
-    })
-    return off
-  }, [api])
-
   // 识图窗口点"填入当前录入"时，若主窗口尚未打开任何账单文件，给出引导提示
   useEffect(() => {
     const off = api.on('apply-recognized-rows', (rows) => {
@@ -119,6 +135,18 @@ function AppInner({ api }: { api: ElectronAPI }) {
     })
     return off
   }, [api])
+
+  // 独立「小票识图」窗口关闭时，恢复右侧面板显示
+  useEffect(() => {
+    const off = api.on('image-detached-closed', () => setShowImagePanel(true))
+    return off
+  }, [api])
+
+  // 把右侧「小票识图」面板拆成独立窗口（自身先隐藏，避免重复显示）
+  function handleDetach() {
+    setShowImagePanel(false)
+    api.openImageDetached()
+  }
 
   async function loadSettings() {
     try {
@@ -268,11 +296,32 @@ function AppInner({ api }: { api: ElectronAPI }) {
       const d = splitDragRef.current
       if (!d) return
       // 鼠标向右拉使左侧更宽，向左拉使其更窄；限制在合理范围内
-      const w = Math.max(200, Math.min(window.innerWidth * 0.7, d.startW + (ev.clientX - d.startX)))
+      const w = Math.max(160, Math.min(window.innerWidth * 0.7, d.startW + (ev.clientX - d.startX)))
       setSideWidth(w)
     }
     const onUp = () => {
       splitDragRef.current = null
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+  }
+
+  // ---- 拖动右侧分隔条，调节「小票识图」面板宽度（向左拖变宽） ----
+  function onImgSplitterDown(e: React.MouseEvent) {
+    e.preventDefault()
+    e.stopPropagation()
+    imgSplitDragRef.current = { startX: e.clientX, startW: imgWidth }
+    const onMove = (ev: MouseEvent) => {
+      const d = imgSplitDragRef.current
+      if (!d) return
+      // 鼠标向左移使右侧面板更宽，向右移使其更窄；限制在合理范围内
+      const w = Math.max(260, Math.min(window.innerWidth * 0.6, d.startW - (ev.clientX - d.startX)))
+      setImgWidth(w)
+    }
+    const onUp = () => {
+      imgSplitDragRef.current = null
       window.removeEventListener('mousemove', onMove)
       window.removeEventListener('mouseup', onUp)
     }
@@ -342,8 +391,12 @@ function AppInner({ api }: { api: ElectronAPI }) {
           onOpenDir={onOpenDir}
         />
         <div className="app-top-actions">
-          <button className="btn btn-outline" onClick={() => api.openImageWindow()} title="打开独立的小票识图窗口（不影响录入）">
-            AI 识图窗口
+          <button
+            className={'btn ' + (showImagePanel ? 'btn-primary' : 'btn-outline')}
+            onClick={() => setShowImagePanel((v) => !v)}
+            title={showImagePanel ? '收起右侧「小票识图」面板' : '展开右侧「小票识图」面板'}
+          >
+            小票识图
           </button>
           <button className="btn btn-outline" onClick={() => setSettingsOpen(true)} title="配置 AI 接口、图片目录、识别提示词">
             AI 设置
@@ -407,6 +460,19 @@ function AppInner({ api }: { api: ElectronAPI }) {
             </div>
           )}
         </main>
+
+        {showImagePanel && (
+          <>
+            <div
+              className="pane-splitter"
+              onMouseDown={onImgSplitterDown}
+              title="拖动调整右侧「小票识图」面板宽度"
+            />
+            <aside className="image-panel-col" style={{ width: imgWidth }}>
+              <ImageWindow api={api} onDetach={handleDetach} />
+            </aside>
+          </>
+        )}
       </div>
 
       <SettingsModal

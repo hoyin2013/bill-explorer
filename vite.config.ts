@@ -17,10 +17,9 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     rollupOptions: {
-      // 多页构建：主窗口 + 独立的小票识图窗口
+      // 单页构建：主窗口（小票识图已内嵌为右侧面板）
       input: {
         main: resolve(__dirname, 'index.html'),
-        image: resolve(__dirname, 'image.html'),
       },
     },
   },

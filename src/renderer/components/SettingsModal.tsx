@@ -201,14 +201,11 @@ export function SettingsModal({ api, open, onClose, onSaved }: Props) {
                   value={settings.imageDir || '未设置'}
                   className="dir-input"
                 />
-                <button type="button" className="btn" onClick={() => {
-                  api.openImageWindow()
-                  onClose()
-                }}>
+                <button type="button" className="btn" onClick={onClose}>
                   前往设置
                 </button>
               </div>
-              <div className="form-hint">图片目录在「AI 识图窗口」中设置，目录中非图片文件会自动过滤。</div>
+              <div className="form-hint">图片目录在右侧「小票识图」面板中点击「选择图片目录」设置，目录中非图片文件会自动过滤。</div>
             </div>
 
             <div className="form-section">

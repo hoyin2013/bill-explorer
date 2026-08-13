@@ -176,10 +176,10 @@ function afterWrite(filePath: string, result: { rowNumber?: number; count?: numb
 // 文件路径（生产模式通过 file:// 加载）
 const PRELOAD_PATH = join(__dirname, 'preload.js')
 const DIST_HTML = join(__dirname, '../dist/index.html')
-const DIST_IMAGE_HTML = join(__dirname, '../dist/image.html')
 
 let mainWindow: BrowserWindow | null = null
-let imageWindow: BrowserWindow | null = null
+// 「小票识图」独立窗口（从主窗口右侧面板拆出来，方便在大屏单独查看）
+let detachedImageWin: BrowserWindow | null = null
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -195,13 +195,6 @@ function createWindow() {
     },
   })
 
-  // 关闭主窗口时，一并关闭独立的小票识图窗口（避免 AI 窗口残留、且防止其 webContents 已销毁导致上报抛错）
-  mainWindow.on('closed', () => {
-    if (imageWindow && !imageWindow.isDestroyed()) {
-      imageWindow.destroy()
-    }
-  })
-
   // 开发模式走 Vite dev server，生产模式走本地文件
   if (process.env.VITE_DEV_SERVER_URL) {
     mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL)
@@ -210,52 +203,40 @@ function createWindow() {
   }
 }
 
-// 创建独立的小票识图窗口（不影响主窗口录入；可同时打开、自由摆放）
-function createImageWindow() {
-  if (imageWindow && !imageWindow.isDestroyed()) {
-    imageWindow.focus()
+// 创建「小票识图」独立窗口：只渲染 ImageWindow 组件（通过 ?detached=image 查询参数识别），
+// 关闭时通知主窗口恢复右侧面板。
+function createDetachedImageWindow() {
+  if (detachedImageWin && !detachedImageWin.isDestroyed()) {
+    detachedImageWin.focus()
     return
   }
-  const mb = mainWindow?.getBounds()
-  imageWindow = new BrowserWindow({
-    width: 620,
-    height: mb ? mb.height : 780,
-    minWidth: 460,
-    minHeight: 560,
-    // 与主窗口等高、紧靠其右侧，打开更协调
-    x: mb ? mb.x + mb.width + 24 : undefined,
-    y: mb ? mb.y : undefined,
-    title: '账单录入器 - 小票识图',
-    show: true,
+  const win = new BrowserWindow({
+    width: 960,
+    height: 720,
+    minWidth: 640,
+    minHeight: 480,
+    title: '小票识图（独立窗口）',
+    backgroundColor: '#f5f6f8',
     webPreferences: {
       preload: PRELOAD_PATH,
       contextIsolation: true,
       nodeIntegration: false,
     },
   })
-
   if (process.env.VITE_DEV_SERVER_URL) {
-    imageWindow.loadURL(process.env.VITE_DEV_SERVER_URL + '/image.html')
+    win.loadURL(process.env.VITE_DEV_SERVER_URL + '?detached=image')
   } else {
-    imageWindow.loadFile(DIST_IMAGE_HTML)
+    win.loadFile(DIST_HTML, { search: 'detached=image' })
   }
-
-  // 关闭识图窗口时：清除主窗口左侧列表的人名置顶，并清空主窗口的搜索框
-  imageWindow.on('closed', () => {
-    imageWindow = null
-    // 主窗口可能已先关闭（其 webContents 已销毁），需先判断再发送，
-    // 否则访问已销毁的 webContents 会抛错，导致第二行 send 被跳过、搜索框清不掉
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      try {
-        mainWindow.webContents.send('recognized-persons', [])
-        mainWindow.webContents.send('image-window-closed')
-      } catch {
-        /* 主窗口已不可达，无需再清搜索框 */
-      }
-    }
+  win.on('closed', () => {
+    detachedImageWin = null
+    // 通知主窗口：独立窗口已关闭，请恢复右侧「小票识图」面板
+    mainWindow?.webContents.send('image-detached-closed')
   })
+  detachedImageWin = win
 }
 
+// 创建主窗口后即可启动应用
 app.whenReady().then(() => {
   createWindow()
 
@@ -595,32 +576,27 @@ ipcMain.handle('add-applied', (_event, filePath: string, imagePath: string) => {
   addApplied(filePath, imagePath)
 })
 
-// ============ 独立"小票识图"窗口 ============
-// 打开独立识图窗口（不影响主窗口录入）
-ipcMain.handle('open-image-window', () => {
-  createImageWindow()
-})
-
-// 识图窗口 → 主窗口：转发识别出的人名（主窗口据此把对应 Excel 置顶）
+// ============ 识图面板 → 主窗口 ============
+// 识图面板（已内嵌于主窗口右侧）上报识别出的人名，主窗口据此把对应 Excel 置顶
 ipcMain.on('image:recognized-persons', (_event, persons: string[]) => {
   mainWindow?.webContents.send('recognized-persons', persons || [])
 })
 
-// 识图窗口 → 主窗口：把识别结果回填到当前打开的录入网格（用户主动点击触发）
+// 识图面板把识别结果回填到当前打开的录入网格（用户主动点击触发）
 ipcMain.on('image:apply-rows', (_event, rows: unknown) => {
   mainWindow?.webContents.send('apply-recognized-rows', rows)
 })
 
-// 识图窗口即将关闭（渲染端 pagehide 触发）：清空主窗口搜索框 + 清除命中置顶。
-// 走与 recognized-persons 相同的 ipcMain.on → webContents.send 转发路径（已被验证可用），
-// 比单纯依赖 imageWindow.on('closed') 更可靠（避免任何时序/状态问题导致事件丢失）。
-ipcMain.on('image:closing', () => {
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    try {
-      mainWindow.webContents.send('recognized-persons', [])
-      mainWindow.webContents.send('image-window-closed')
-    } catch {
-      /* 主窗口已不可达，无需再清 */
-    }
+// ============ 独立「小票识图」窗口：拆分 / 合并 ============
+// 把右侧面板拆成独立窗口（方便在大屏单独查看 / 对照录入）
+ipcMain.handle('open-image-detached', () => {
+  createDetachedImageWindow()
+})
+
+// 把独立窗口合并回主窗口：关闭该窗口，其 closed 事件会通知主窗口恢复面板
+ipcMain.handle('attach-image-detached', () => {
+  if (detachedImageWin && !detachedImageWin.isDestroyed()) {
+    detachedImageWin.close()
   }
+  detachedImageWin = null
 })

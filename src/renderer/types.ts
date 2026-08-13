@@ -216,8 +216,6 @@ export interface ElectronAPI {
   // 记录某张图片已自动填入
   addApplied: (filePath: string, imagePath: string) => Promise<void>
 
-  // 打开独立的小票识图窗口（不影响录入）
-  openImageWindow: () => Promise<void>
   // 探测检测增强环境（ONNX 模型与运行时是否就绪），供 UI 提前提示
   detectEnvironment: () => Promise<{
     modelExists: boolean
@@ -230,8 +228,10 @@ export interface ElectronAPI {
   reportPersons: (persons: string[]) => void
   // 识图窗口 → 主进程：把识别结果回填到主窗口当前打开的录入网格（用户主动点击才触发）
   applyToMain: (rows: AIRecognizedRow[]) => void
-  // 识图窗口 → 主进程：窗口即将关闭时通知（用于清空主窗口搜索框 + 清除命中置顶）
-  notifyImageClosing: () => void
+  // 把「小票识图」面板拆成独立窗口（主进程创建 BrowserWindow）
+  openImageDetached: () => Promise<void>
+  // 把独立识图窗口合并回主窗口（主进程关闭该窗口；关闭后主窗口自动恢复面板）
+  attachImageDetached: () => Promise<void>
 }
 
 export interface FileEntry {

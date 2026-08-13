@@ -1,8 +1,11 @@
-import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from 'react'
+import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type MutableRefObject } from 'react'
 import { ElectronAPI, AIRecognizedRow, DetectedBox, RecognizedTicket } from '../types'
 
 interface Props {
   api: ElectronAPI
+  detached?: boolean
+  onDetach?: () => void
+  onAttach?: () => void
 }
 
 // 从一批识别结果里提取去重后的客户人名。
@@ -87,7 +90,7 @@ const RESULT_COLS: Array<{ field: keyof AIRecognizedRow; label: string; w: strin
   { field: 'amount', label: '金额', w: '82px' },
 ]
 
-export function ImageWindow({ api }: Props) {
+export function ImageWindow({ api, detached, onDetach, onAttach }: Props) {
   const [imageDir, setImageDir] = useState('')
   const [images, setImages] = useState<Array<{ name: string; path: string }>>([])
   const [selected, setSelected] = useState('')
@@ -110,6 +113,8 @@ export function ImageWindow({ api }: Props) {
   const [singleRotate, setSingleRotate] = useState(0) // 单张视图内手动微调旋转
   const [singleLoading, setSingleLoading] = useState(false) // 逐张识别中
   const [copyMsg, setCopyMsg] = useState('')
+  // 单张小票图片点击放大：全屏查看（lightbox）
+  const [lightbox, setLightbox] = useState(false)
   // 检测增强环境探测结果（ONNX 模型与运行时是否就绪）；null=尚未探测完成
   const [detectEnv, setDetectEnv] = useState<{
     modelExists: boolean
@@ -120,8 +125,25 @@ export function ImageWindow({ api }: Props) {
   const [zoom, setZoom] = useState(1)
   const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 })
   const [isDragging, setIsDragging] = useState(false)
-  // 图片列表（左）与预览区（右）的可调分隔宽度（px）
-  const [listWidth, setListWidth] = useState(200)
+  // 单张小票内联视图缩放 / 平移状态（与总览预览共用同一套交互）
+  const [singleZoom, setSingleZoom] = useState(1)
+  const [singlePan, setSinglePan] = useState<{ x: number; y: number }>({ x: 0, y: 0 })
+  const [singleDragging, setSingleDragging] = useState(false)
+  const singleZoomRef = useRef(1)
+  const singlePanRef = useRef({ x: 0, y: 0 })
+  const singleDragRef = useRef<{ startX: number; startY: number; panX: number; panY: number; moved: boolean } | null>(null)
+  const singleClickGuard = useRef(false)
+  const singleWrapRef = useRef<HTMLDivElement>(null)
+  // 放大查看（lightbox）缩放 / 平移状态
+  const [lbZoom, setLbZoom] = useState(1)
+  const [lbPan, setLbPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 })
+  const [lbDragging, setLbDragging] = useState(false)
+  const lbZoomRef = useRef(1)
+  const lbPanRef = useRef({ x: 0, y: 0 })
+  const lbDragRef = useRef<{ startX: number; startY: number; panX: number; panY: number } | null>(null)
+  const lbWrapRef = useRef<HTMLDivElement>(null)
+  // 图片列表（左）与预览区（右）的可调分隔宽度（px）；面板整体偏窄，默认收窄
+  const [listWidth, setListWidth] = useState(124)
   // 复位旋转瞬间禁用过渡，避免「从旋转角回正」触发可见的旋转动画
   const [instant, setInstant] = useState(false)
   const wrapRef = useRef<HTMLDivElement>(null)
@@ -147,6 +169,16 @@ export function ImageWindow({ api }: Props) {
     api.reportPersons(recognized)
   }, [recognized, api])
 
+  // 放大查看（lightbox）打开时，按 Esc 关闭
+  useEffect(() => {
+    if (!lightbox) return
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setLightbox(false)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [lightbox])
+
   // 根据 displayRows 自动更新已识别人名。
   // 单张视图下，只上报「当前正在查看的那张」小票的人名 —— 逐张识别时左侧「命中」置顶
   // 才不会不断叠加；总览视图仍用全部小票的并集（便于「填入全部」批量核对）。
@@ -166,6 +198,27 @@ export function ImageWindow({ api }: Props) {
   useEffect(() => {
     panRef.current = pan
   }, [pan])
+  useEffect(() => {
+    singleZoomRef.current = singleZoom
+  }, [singleZoom])
+  useEffect(() => {
+    singlePanRef.current = singlePan
+  }, [singlePan])
+  useEffect(() => {
+    lbZoomRef.current = lbZoom
+  }, [lbZoom])
+  useEffect(() => {
+    lbPanRef.current = lbPan
+  }, [lbPan])
+  // 放大查看（lightbox）每次打开都复位缩放/平移，从原始大小开始
+  useEffect(() => {
+    if (lightbox) {
+      lbZoomRef.current = 1
+      lbPanRef.current = { x: 0, y: 0 }
+      setLbZoom(1)
+      setLbPan({ x: 0, y: 0 })
+    }
+  }, [lightbox])
 
   // 滚轮缩放（以光标为锚点）
   useEffect(() => {
@@ -209,6 +262,88 @@ export function ImageWindow({ api }: Props) {
       if (draggingRef.current) {
         draggingRef.current = null
         setIsDragging(false)
+      }
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+    return () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+  }, [])
+
+  // 单张视图：滚轮缩放（以光标为锚点）
+  useEffect(() => {
+    const el = singleWrapRef.current
+    if (!el || viewMode !== 'single') return
+    const onWheel = (e: WheelEvent) => {
+      if (!tickets[active]) return
+      e.preventDefault()
+      const rect = el.getBoundingClientRect()
+      const cx = e.clientX - (rect.left + rect.width / 2)
+      const cy = e.clientY - (rect.top + rect.height / 2)
+      zoomAround(singleZoomRef, singlePanRef, setSingleZoom, setSinglePan, e.deltaY < 0 ? 1.12 : 1 / 1.12, cx, cy)
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onWheel)
+  }, [viewMode, active, tickets])
+
+  // 放大查看（lightbox）：滚轮缩放（以光标为锚点）
+  useEffect(() => {
+    const el = lbWrapRef.current
+    if (!el || !lightbox) return
+    const onWheel = (e: WheelEvent) => {
+      if (!tickets[active]) return
+      e.preventDefault()
+      const rect = el.getBoundingClientRect()
+      const cx = e.clientX - (rect.left + rect.width / 2)
+      const cy = e.clientY - (rect.top + rect.height / 2)
+      zoomAround(lbZoomRef, lbPanRef, setLbZoom, setLbPan, e.deltaY < 0 ? 1.12 : 1 / 1.12, cx, cy)
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onWheel)
+  }, [lightbox, tickets])
+
+  // 单张视图：拖拽平移（监听 window，拖出容器也能继续）
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      const d = singleDragRef.current
+      if (!d) return
+      const nx = d.panX + (e.clientX - d.startX)
+      const ny = d.panY + (e.clientY - d.startY)
+      if (Math.abs(e.clientX - d.startX) > 3 || Math.abs(e.clientY - d.startY) > 3) d.moved = true
+      singlePanRef.current = { x: nx, y: ny }
+      setSinglePan({ x: nx, y: ny })
+    }
+    const onUp = () => {
+      if (singleDragRef.current) {
+        if (singleDragRef.current.moved) singleClickGuard.current = true
+        singleDragRef.current = null
+        setSingleDragging(false)
+      }
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+    return () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+  }, [])
+
+  // 放大查看（lightbox）：拖拽平移（监听 window）
+  useEffect(() => {
+    const onMove = (e: MouseEvent) => {
+      const d = lbDragRef.current
+      if (!d) return
+      const nx = d.panX + (e.clientX - d.startX)
+      const ny = d.panY + (e.clientY - d.startY)
+      lbPanRef.current = { x: nx, y: ny }
+      setLbPan({ x: nx, y: ny })
+    }
+    const onUp = () => {
+      if (lbDragRef.current) {
+        lbDragRef.current = null
+        setLbDragging(false)
       }
     }
     window.addEventListener('mousemove', onMove)
@@ -288,13 +423,102 @@ export function ImageWindow({ api }: Props) {
     setPan({ x: 0, y: 0 })
   }
 
+  // 缩放范围限制
+  function clampZoom(z: number): number {
+    return Math.min(8, Math.max(0.2, z))
+  }
+
+  // 以锚点（相对 wrap 中心的偏移 cx/cy）缩放，保持该点处内容不动
+  function zoomAround(
+    zRef: MutableRefObject<number>,
+    pRef: MutableRefObject<{ x: number; y: number }>,
+    setZ: (n: number) => void,
+    setP: (n: { x: number; y: number }) => void,
+    factor: number,
+    cx: number,
+    cy: number,
+  ) {
+    const z = zRef.current
+    const nz = clampZoom(z * factor)
+    if (nz === z) return
+    const p = pRef.current
+    const np = { x: cx - (nz / z) * (cx - p.x), y: cy - (nz / z) * (cy - p.y) }
+    zRef.current = nz
+    pRef.current = np
+    // 缩回到 100% 及以下时，把平移归零，避免留白偏移
+    if (nz <= 1.001) {
+      pRef.current = { x: 0, y: 0 }
+      setP({ x: 0, y: 0 })
+      setZ(nz)
+    } else {
+      setZ(nz)
+      setP(np)
+    }
+  }
+
+  // 总览预览：以 wrap 中心为锚点的按钮缩放
+  function zoomBy(factor: number) {
+    const el = wrapRef.current
+    if (!el) return
+    const rect = el.getBoundingClientRect()
+    zoomAround(zoomRef, panRef, setZoom, setPan, factor, rect.width / 2, rect.height / 2)
+  }
+
+  // 单张内联视图：以 wrap 中心为锚点的按钮缩放
+  function singleZoomBy(factor: number) {
+    const el = singleWrapRef.current
+    if (!el) return
+    const rect = el.getBoundingClientRect()
+    zoomAround(singleZoomRef, singlePanRef, setSingleZoom, setSinglePan, factor, rect.width / 2, rect.height / 2)
+  }
+
+  // 放大查看（lightbox）：以自身中心为锚点的按钮缩放
+  function lbZoomBy(factor: number) {
+    zoomAround(lbZoomRef, lbPanRef, setLbZoom, setLbPan, factor, 0, 0)
+  }
+
+  function resetSingleView() {
+    singleZoomRef.current = 1
+    singlePanRef.current = { x: 0, y: 0 }
+    setSingleZoom(1)
+    setSinglePan({ x: 0, y: 0 })
+  }
+  function resetLbView() {
+    lbZoomRef.current = 1
+    lbPanRef.current = { x: 0, y: 0 }
+    setLbZoom(1)
+    setLbPan({ x: 0, y: 0 })
+  }
+
+  // 单张内联视图：左键拖拽平移 / 点击放大（拖拽后抑制点击，避免误触放大）
+  function onSingleMouseDown(e: ReactMouseEvent) {
+    if (e.button !== 0 || !activeTicket) return
+    const p = singlePanRef.current
+    singleDragRef.current = { startX: e.clientX, startY: e.clientY, panX: p.x, panY: p.y, moved: false }
+    setSingleDragging(true)
+  }
+  function onSingleWrapClick() {
+    if (singleClickGuard.current) {
+      singleClickGuard.current = false
+      return
+    }
+    setLightbox(true)
+  }
+  // 放大查看（lightbox）：左键拖拽平移
+  function onLbMouseDown(e: ReactMouseEvent) {
+    if (e.button !== 0) return
+    const p = lbPanRef.current
+    lbDragRef.current = { startX: e.clientX, startY: e.clientY, panX: p.x, panY: p.y }
+    setLbDragging(true)
+  }
+
   // 拖动分隔条调整「图片列表 / 预览」左右宽度
   function onSplitterDown(e: ReactMouseEvent) {
     e.preventDefault()
     const startX = e.clientX
     const startW = listWidth
     const onMove = (ev: MouseEvent) => {
-      const nw = Math.min(460, Math.max(140, startW + (ev.clientX - startX)))
+      const nw = Math.min(220, Math.max(96, startW + (ev.clientX - startX)))
       setListWidth(nw)
     }
     const onUp = () => {
@@ -410,6 +634,7 @@ export function ImageWindow({ api }: Props) {
     if (i < 0 || i >= tickets.length) return
     setActive(i)
     setSingleRotate(0)
+    resetSingleView()
     setViewMode('single')
   }
 
@@ -509,21 +734,6 @@ export function ImageWindow({ api }: Props) {
       .catch(() => setDetectEnv(null))
   }, [api])
 
-  // 窗口即将关闭（pagehide，关闭前必触发）时通知主进程：
-  // 清空主窗口左侧搜索框 + 清除人名命中置顶。与 reportPersons 同一条已被验证可用的 IPC 路径，
-  // 比单纯依赖主进程 imageWindow.on('closed') 更可靠，确保「关闭录入窗口即清空搜索框」稳定生效。
-  useEffect(() => {
-    const onHide = () => {
-      try {
-        api.notifyImageClosing()
-      } catch {
-        /* 渲染进程即将卸载，忽略 */
-      }
-    }
-    window.addEventListener('pagehide', onHide)
-    return () => window.removeEventListener('pagehide', onHide)
-  }, [api])
-
   // 是否展示"来源"列：仅当结果来自多张不同图片时（单图识别不显示，避免冗余）
   const distinctSources = new Set(rows.map((r) => r.source).filter(Boolean))
   const showSource = distinctSources.size > 1
@@ -536,7 +746,26 @@ export function ImageWindow({ api }: Props) {
     <div className="image-window">
       <div className="image-panel">
         <div className="image-panel-header">
-          <span className="image-panel-title">小票识图（独立窗口）</span>
+          <div className="image-panel-head-row">
+            <span className="image-panel-title">小票识图</span>
+            {detached ? (
+              <button
+                className="btn btn-small btn-outline"
+                onClick={onAttach}
+                title="把本窗口合并回主窗口右侧面板"
+              >
+                ⎘ 合并回主窗口
+              </button>
+            ) : (
+              <button
+                className="btn btn-small btn-outline"
+                onClick={onDetach}
+                title="把本面板拆成独立窗口，方便在大屏上单独查看 / 对照录入"
+              >
+                ⧉ 拆分窗口
+              </button>
+            )}
+          </div>
           {imageDir && (
             <span className="image-panel-dir" title={imageDir}>
               {imageDir}
@@ -547,6 +776,59 @@ export function ImageWindow({ api }: Props) {
         <button className="btn btn-small btn-outline" onClick={chooseDir} style={{ alignSelf: 'flex-start' }}>
           选择图片目录
         </button>
+
+        {/* 顶部工具栏：旋转 / 缩放 / 当前图 / 单张导航 —— 统一上移到面板最顶部 */}
+        <div className="image-topbar">
+          {viewMode === 'single' && activeTicket ? (
+            <>
+              <button className="btn btn-small btn-outline" onClick={() => setViewMode('overview')} title="返回带检测框的总览">
+                ← 返回总览
+              </button>
+              <span className="single-counter">
+                第 <b>{active + 1}</b> / {tickets.length} 张
+              </span>
+              {activeTicket.box.conf != null && (
+                <span className="single-conf">置信度 {Math.round(activeTicket.box.conf * 100)}%</span>
+              )}
+              {activeTicket.angle ? <span className="single-rot">已自动旋转 {activeTicket.angle}°</span> : null}
+              <span className="topbar-spacer" />
+              <button className="btn btn-small btn-outline" onClick={() => setSingleRotate((r) => r - 90)} title="向左旋转 90°">
+                ↺ 左转90°
+              </button>
+              <button className="btn btn-small btn-outline" onClick={() => setSingleRotate((r) => r + 90)} title="向右旋转 90°">
+                ↻ 右转90°
+              </button>
+              <button className="btn btn-small btn-link" onClick={() => setSingleRotate(0)} title="复位旋转">
+                复位
+              </button>
+              <span className="image-zoom-sep" />
+              <button className="btn btn-small btn-outline" onClick={() => singleZoomBy(1 / 1.2)} title="缩小">－</button>
+              <button className="btn btn-small btn-outline" onClick={() => singleZoomBy(1.2)} title="放大">＋</button>
+              <span className="image-zoom">{Math.round(singleZoom * 100)}%</span>
+            </>
+          ) : (
+            <>
+              <button className="btn btn-small btn-outline" onClick={() => setRotate((r) => (r + 270) % 360)} disabled={!preview} title="向左旋转 90°">
+                ↺ 左转
+              </button>
+              <button className="btn btn-small btn-outline" onClick={() => setRotate((r) => (r + 90) % 360)} disabled={!preview} title="向右旋转 90°">
+                ↻ 右转
+              </button>
+              <button className="btn btn-small btn-link" onClick={() => { setRotate(0); resetView() }} disabled={!preview} title="复位旋转与缩放/位置">
+                复位
+              </button>
+              <button className="btn btn-small btn-outline" onClick={() => zoomBy(1 / 1.2)} disabled={!preview} title="缩小">－</button>
+              <button className="btn btn-small btn-outline" onClick={() => zoomBy(1.2)} disabled={!preview} title="放大">＋</button>
+              <span className="image-rotate-badge">旋转 {rotate}°</span>
+              <span className="image-zoom">{Math.round(zoom * 100)}%</span>
+              {selected && (
+                <span className="image-current-name" title={selected}>
+                  {baseName(selected)}
+                </span>
+              )}
+            </>
+          )}
+        </div>
 
         <div className="image-content">
           {/* 左侧：可见的图片列表 */}
@@ -582,32 +864,25 @@ export function ImageWindow({ api }: Props) {
             {viewMode === 'single' && activeTicket ? (
               /* ====== 单张小票放大视图 ====== */
               <div className="single-ticket-view">
-                <div className="image-toolbar">
-                  <button className="btn btn-small btn-outline" onClick={() => setViewMode('overview')} title="返回带检测框的总览">
-                    ← 返回总览
-                  </button>
-                  <span className="single-counter">
-                    第 <b>{active + 1}</b> / {tickets.length} 张
-                  </span>
-                  {activeTicket.box.conf != null && (
-                    <span className="single-conf">置信度 {Math.round(activeTicket.box.conf * 100)}%</span>
-                  )}
-                  {activeTicket.angle ? <span className="single-rot">已自动旋转 {activeTicket.angle}°</span> : null}
-                </div>
-
-                <div className="single-image-wrap">
+                <div
+                  className="single-image-wrap"
+                  ref={singleWrapRef}
+                  onMouseDown={onSingleMouseDown}
+                  onClick={onSingleWrapClick}
+                  style={{ cursor: singleDragging ? 'grabbing' : 'zoom-in' }}
+                  title="滚轮缩放 · 拖拽平移 · 点击放大查看"
+                >
                   <img
                     src={`data:image/jpeg;base64,${activeTicket.crop}`}
                     alt={`第 ${active + 1} 张小票`}
                     className="single-image"
                     draggable={false}
-                    style={{ transform: `rotate(${singleRotate}deg)` }}
+                    style={{
+                      transform: `translate(${singlePan.x}px, ${singlePan.y}px) rotate(${singleRotate}deg) scale(${singleZoom})`,
+                      transition: singleDragging ? 'none' : 'transform 0.2s',
+                    }}
                   />
-                </div>
-                <div className="single-rotate-bar">
-                  <button className="btn btn-small btn-outline" onClick={() => setSingleRotate((r) => r - 90)}>↺ 左转90°</button>
-                  <button className="btn btn-small btn-outline" onClick={() => setSingleRotate((r) => r + 90)}>↻ 右转90°</button>
-                  <button className="btn btn-small btn-link" onClick={() => setSingleRotate(0)}>复位</button>
+                  <span className="single-zoom-hint">🔍 滚轮缩放 · 点击放大</span>
                 </div>
 
                 {/* 该张小票的识别信息（可编辑，便于核对后录入） */}
@@ -714,40 +989,6 @@ export function ImageWindow({ api }: Props) {
             ) : (
               /* ====== 总览视图（带检测框的原图） ====== */
               <>
-                <div className="image-toolbar">
-                  <button
-                    className="btn btn-small btn-outline"
-                    onClick={() => setRotate((r) => (r + 270) % 360)}
-                    disabled={!preview}
-                    title="向左旋转 90°"
-                  >
-                    ↺ 左转
-                  </button>
-                  <button
-                    className="btn btn-small btn-outline"
-                    onClick={() => setRotate((r) => (r + 90) % 360)}
-                    disabled={!preview}
-                    title="向右旋转 90°"
-                  >
-                    ↻ 右转
-                  </button>
-                  <button
-                    className="btn btn-small btn-link"
-                    onClick={() => { setRotate(0); resetView() }}
-                    disabled={!preview}
-                    title="复位旋转与缩放/位置"
-                  >
-                    复位
-                  </button>
-                  <span className="image-rotate-badge">旋转 {rotate}°</span>
-                  <span className="image-zoom">{Math.round(zoom * 100)}%</span>
-                  {selected && (
-                    <span className="image-current-name" title={selected}>
-                      {baseName(selected)}
-                    </span>
-                  )}
-                </div>
-
                 <div
                   className="image-preview-wrap"
                   ref={wrapRef}
@@ -974,6 +1215,56 @@ export function ImageWindow({ api }: Props) {
             {copyMsg && <div className="image-status ok">{copyMsg}</div>}
           </div>
         </div>
+
+        {/* 单张小票放大查看（lightbox）：点击图片弹出居中大图，Esc / 点击空白关闭 */}
+        {lightbox && activeTicket && (
+          <div className="image-lightbox" onClick={() => setLightbox(false)}>
+            <div className="image-lightbox-box" onClick={(e) => e.stopPropagation()}>
+              <div className="image-lightbox-bar">
+                <span className="image-lightbox-title">第 {active + 1} 张小票 · 滚轮缩放 / 拖拽平移 · 点击空白或按 Esc 关闭</span>
+                <div className="image-lightbox-actions">
+                  <button className="btn btn-small btn-outline" onClick={() => lbZoomBy(1 / 1.2)} title="缩小">－</button>
+                  <button className="btn btn-small btn-outline" onClick={() => lbZoomBy(1.2)} title="放大">＋</button>
+                  <button className="btn btn-small btn-outline" onClick={resetLbView} title="复位缩放与位置">复位</button>
+                  <button
+                    className="btn btn-small btn-outline"
+                    onClick={() => setSingleRotate((r) => r - 90)}
+                    title="向左旋转 90°"
+                  >
+                    ↺ 左转90°
+                  </button>
+                  <button
+                    className="btn btn-small btn-outline"
+                    onClick={() => setSingleRotate((r) => r + 90)}
+                    title="向右旋转 90°"
+                  >
+                    ↻ 右转90°
+                  </button>
+                  <button
+                    className="btn btn-small btn-link"
+                    onClick={() => setLightbox(false)}
+                  >
+                    关闭
+                  </button>
+                </div>
+              </div>
+              <div className="image-lightbox-body" ref={lbWrapRef}>
+                <img
+                  src={`data:image/jpeg;base64,${activeTicket.crop}`}
+                  alt={`第 ${active + 1} 张小票`}
+                  className="image-lightbox-img"
+                  draggable={false}
+                  onMouseDown={onLbMouseDown}
+                  style={{
+                    transform: `translate(${lbPan.x}px, ${lbPan.y}px) rotate(${singleRotate}deg) scale(${lbZoom})`,
+                    transition: lbDragging ? 'none' : 'transform 0.15s',
+                    cursor: lbDragging ? 'grabbing' : lbZoom > 1 ? 'grab' : 'zoom-out',
+                  }}
+                />
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   )

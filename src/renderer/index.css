@@ -87,7 +87,7 @@ body {
 }
 
 .app-side {
-  width: 320px;
+  width: 200px;
   flex: 0 0 auto;
   display: flex;
   flex-direction: column;
@@ -1056,15 +1056,28 @@ body {
   overflow: hidden;
 }
 
-.image-panel {
-  flex: 0 0 360px;
+/* 右侧"小票识图"面板列（App 中的 <aside> 容器） */
+.image-panel-col {
+  flex: 0 0 auto;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid #e4e7ed;
+  background: #f5f6f8;
+  overflow: hidden;
+}
+
+.image-panel {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   gap: 8px;
   background: #fff;
   border: 1px solid #e4e7ed;
   border-radius: 6px;
+  margin: 8px;
   padding: 10px;
   overflow: hidden;
 }
@@ -1086,6 +1099,51 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* 标题行：标题居左，拆分/合并按钮推到最右 */
+.image-panel-head-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.image-panel-head-row .image-panel-title {
+  flex: 0 0 auto;
+}
+.image-panel-head-row .btn {
+  margin-left: auto;
+}
+
+/* 独立「小票识图」窗口根容器：铺满整个窗口 */
+.detached-root {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  background: #f5f6f8;
+}
+
+/* 顶部工具栏里旋转与缩放之间的一根小分隔线 */
+.image-zoom-sep {
+  width: 1px;
+  align-self: stretch;
+  background: #dcdfe6;
+  margin: 2px 2px;
+}
+
+/* 顶部工具栏：旋转 / 缩放 / 当前图 / 单张导航，统一位于面板最上方 */
+.image-topbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 6px 8px;
+  background: #fafafa;
+  border: 1px solid #ebeef5;
+  border-radius: 6px;
+}
+.topbar-spacer {
+  flex: 1 1 auto;
+}
 
 .image-toolbar {
   display: flex;
@@ -1103,8 +1161,9 @@ body {
 }
 
 .image-preview-wrap {
-  flex: 1 1 auto;
+  flex: 0 0 auto;
   min-height: 120px;
+  max-height: 42vh;
   background: #f7f8fa;
   border: 1px solid #ebeef5;
   border-radius: 6px;
@@ -1264,6 +1323,7 @@ body {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  overflow-y: auto;
 }
 .image-current-name {
   font-size: 12px;
@@ -1581,16 +1641,12 @@ body {
 /* ============ 独立"小票识图"窗口 ============ */
 /* 让 image-panel 填满整个独立窗口（覆盖内嵌时的固定 360px 宽度） */
 .image-window {
-  position: fixed;
-  inset: 0;
-  padding: 12px;
-  background: #f5f6f8;
-  overflow: hidden;
-}
-.image-window .image-panel {
   flex: 1 1 auto;
-  width: 100%;
-  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 /* 左侧文件列表：识图命中的文件置顶并高亮 */
@@ -1771,6 +1827,7 @@ body {
   color: #67c23a;
 }
 .single-image-wrap {
+  position: relative;
   width: 100%;
   flex: 1 1 auto;
   min-height: 180px;
@@ -1781,8 +1838,9 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  overflow: auto;
+  overflow: hidden;
   padding: 8px;
+  cursor: zoom-in;
 }
 .single-image {
   max-width: 100%;
@@ -1791,6 +1849,19 @@ body {
   transform-origin: center center;
   transition: transform 0.2s;
   box-shadow: 0 2px 12px rgba(0, 0, 0, 0.4);
+  cursor: zoom-in;
+}
+.single-zoom-hint {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  font-size: 11px;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.55);
+  border-radius: 10px;
+  padding: 2px 8px;
+  pointer-events: none;
+  user-select: none;
 }
 .single-rotate-bar {
   display: flex;
@@ -1829,6 +1900,83 @@ body {
   color: #67c23a;
   background: #f0f9eb;
   border: 1px solid #c2e7b0;
+}
+
+/* ====== 单张小票放大查看（lightbox 居中弹窗，按图片实际大小收缩） ====== */
+.image-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 3000;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+/* 弹窗本体：宽度/高度随图片内容收缩（fit-content），但不超过视口，
+   因此小图就是小窗，大图才接近满屏，不会出现"巨大空窗" */
+.image-lightbox-box {
+  display: flex;
+  flex-direction: column;
+  width: fit-content;
+  height: fit-content;
+  max-width: 92vw;
+  max-height: 88vh;
+  background: #2b2b2b;
+  border: 1px solid #555;
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+.image-lightbox-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 12px;
+  background: rgba(0, 0, 0, 0.55);
+  flex-shrink: 0;
+}
+.image-lightbox-title {
+  font-size: 13px;
+  color: #fff;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.image-lightbox-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.image-lightbox-actions .btn-outline {
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.6);
+  background: transparent;
+}
+.image-lightbox-actions .btn-outline:hover {
+  background: rgba(255, 255, 255, 0.15);
+}
+.image-lightbox-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px;
+  overflow: hidden;
+  /* 小图不缩放，原样显示；避免被 object-fit 拉伸到铺满整个窗 */
+  background: #2b2b2b;
+}
+.image-lightbox-img {
+  display: block;
+  max-width: calc(92vw - 48px);
+  max-height: calc(88vh - 64px);
+  object-fit: contain;
+  transform-origin: center center;
+  transition: transform 0.2s;
+  box-shadow: 0 2px 16px rgba(0, 0, 0, 0.6);
+  cursor: zoom-out;
 }
 
 
