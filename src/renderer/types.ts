@@ -218,12 +218,20 @@ export interface ElectronAPI {
 
   // 打开独立的小票识图窗口（不影响录入）
   openImageWindow: () => Promise<void>
+  // 探测检测增强环境（ONNX 模型与运行时是否就绪），供 UI 提前提示
+  detectEnvironment: () => Promise<{
+    modelExists: boolean
+    runtimeReady: boolean
+    detail: string
+  }>
   // 订阅主进程发往渲染进程的事件（返回取消订阅函数）
   on: (channel: string, listener: (...args: unknown[]) => void) => () => void
   // 识图窗口 → 主进程：上报本次识别出的人名（用于把左侧列表对应文件置顶）
   reportPersons: (persons: string[]) => void
   // 识图窗口 → 主进程：把识别结果回填到主窗口当前打开的录入网格（用户主动点击才触发）
   applyToMain: (rows: AIRecognizedRow[]) => void
+  // 识图窗口 → 主进程：窗口即将关闭时通知（用于清空主窗口搜索框 + 清除命中置顶）
+  notifyImageClosing: () => void
 }
 
 export interface FileEntry {

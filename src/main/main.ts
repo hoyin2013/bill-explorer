@@ -5,7 +5,7 @@ import { scanDirectory, openFile, revealFile } from './file-service'
 import { appendRows, previewRows, updateRows, loadSheet, saveSheet, listBackups, restoreBackup } from './excel-memo'
 import { listImages, readImageBase64 } from './image-service'
 import { recognizeReceipt, DEFAULT_PROMPT, AIConfig, AIRecognizedRow, buildNameList, buildAugmentedPrompt, correctPersonNames, recognizeTicketsWithDetection, recognizeSingleCrop, type RecognizedTicket } from './ai-service'
-import { getDefaultModelPath, detectTickets } from './detection'
+import { getDefaultModelPath, detectTickets, detectEnvironment } from './detection'
 
 // 最近修改历史的单条记录
 interface HistoryRecord {
@@ -195,6 +195,13 @@ function createWindow() {
     },
   })
 
+  // 关闭主窗口时，一并关闭独立的小票识图窗口（避免 AI 窗口残留、且防止其 webContents 已销毁导致上报抛错）
+  mainWindow.on('closed', () => {
+    if (imageWindow && !imageWindow.isDestroyed()) {
+      imageWindow.destroy()
+    }
+  })
+
   // 开发模式走 Vite dev server，生产模式走本地文件
   if (process.env.VITE_DEV_SERVER_URL) {
     mainWindow.loadURL(process.env.VITE_DEV_SERVER_URL)
@@ -233,10 +240,19 @@ function createImageWindow() {
     imageWindow.loadFile(DIST_IMAGE_HTML)
   }
 
-  // 关闭识图窗口时，清除主窗口左侧列表的人名置顶
+  // 关闭识图窗口时：清除主窗口左侧列表的人名置顶，并清空主窗口的搜索框
   imageWindow.on('closed', () => {
     imageWindow = null
-    mainWindow?.webContents.send('recognized-persons', [])
+    // 主窗口可能已先关闭（其 webContents 已销毁），需先判断再发送，
+    // 否则访问已销毁的 webContents 会抛错，导致第二行 send 被跳过、搜索框清不掉
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      try {
+        mainWindow.webContents.send('recognized-persons', [])
+        mainWindow.webContents.send('image-window-closed')
+      } catch {
+        /* 主窗口已不可达，无需再清搜索框 */
+      }
+    }
   })
 }
 
@@ -249,7 +265,8 @@ app.whenReady().then(() => {
 })
 
 app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') app.quit()
+  // 关掉主窗口即整体退出（同时会先销毁 AI 识图窗口），不再区分平台保留在后台
+  app.quit()
 })
 
 // ============ IPC 通道：选择工作目录 ============
@@ -484,7 +501,9 @@ ipcMain.handle('ai-recognize', async (_event, imagePath: string) => {
 ipcMain.handle('ai-detect', async (_event, payload: { imagePath?: string; imageBase64?: string }) => {
   const settings = getSettings()
   const modelPath = settings.detectModel && settings.detectModel.trim() ? settings.detectModel.trim() : getDefaultModelPath()
-  const pythonPath = settings.pythonPath && settings.pythonPath.trim() ? settings.pythonPath.trim() : 'python'
+  // 未显式指定时传空串，由 detection 自动探测可用解释器（python3 优先），
+  // 不再写死 'python'（macOS 上默认就没有 python 命令）。
+  const pythonPath = settings.pythonPath && settings.pythonPath.trim() ? settings.pythonPath.trim() : ''
   const enableDetect = settings.enableDetect !== false
   if (!enableDetect) {
     return { ok: false, modelAvailable: false, message: '检测增强已关闭，请在设置中启用。', boxes: [], imageWidth: 0, imageHeight: 0 }
@@ -515,6 +534,13 @@ ipcMain.handle('ai-detect', async (_event, payload: { imagePath?: string; imageB
   }
 })
 
+// ============ IPC 通道：探测检测增强的运行环境（Python / ultralytics / 模型是否就绪） ============
+// 供识图窗口提前给出提示，而不是让用户点「检测」后才慢悠悠地失败。
+ipcMain.handle('detect-environment', async () => {
+  const env = await detectEnvironment()
+  return env
+})
+
 // ============ IPC 通道：仅识别单张裁剪小票（用于「先框出、再逐张识别」流程） ============
 ipcMain.handle('ai-recognize-crop', async (_event, cropBase64: string) => {
   const settings = getSettings()
@@ -537,7 +563,7 @@ ipcMain.handle('ai-recognize-detected', async (_event, payload: { imagePath?: st
   const settings = getSettings()
   const nameList = await buildNameList(store.get('workDir') || '')
   const modelPath = settings.detectModel && settings.detectModel.trim() ? settings.detectModel.trim() : getDefaultModelPath()
-  const pythonPath = settings.pythonPath && settings.pythonPath.trim() ? settings.pythonPath.trim() : 'python'
+  const pythonPath = settings.pythonPath && settings.pythonPath.trim() ? settings.pythonPath.trim() : ''
   const enableDetect = settings.enableDetect !== false
   try {
     const res = await recognizeTicketsWithDetection(
@@ -583,4 +609,18 @@ ipcMain.on('image:recognized-persons', (_event, persons: string[]) => {
 // 识图窗口 → 主窗口：把识别结果回填到当前打开的录入网格（用户主动点击触发）
 ipcMain.on('image:apply-rows', (_event, rows: unknown) => {
   mainWindow?.webContents.send('apply-recognized-rows', rows)
+})
+
+// 识图窗口即将关闭（渲染端 pagehide 触发）：清空主窗口搜索框 + 清除命中置顶。
+// 走与 recognized-persons 相同的 ipcMain.on → webContents.send 转发路径（已被验证可用），
+// 比单纯依赖 imageWindow.on('closed') 更可靠（避免任何时序/状态问题导致事件丢失）。
+ipcMain.on('image:closing', () => {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    try {
+      mainWindow.webContents.send('recognized-persons', [])
+      mainWindow.webContents.send('image-window-closed')
+    } catch {
+      /* 主窗口已不可达，无需再清 */
+    }
+  }
 })

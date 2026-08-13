@@ -1022,6 +1022,25 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
     onClose()
   }
 
+  // 按 ESC 关闭录入面板（与右上角「关闭」按钮 title 提示一致）。
+  // 正在编辑单元格（焦点在 input/textarea）时，由单元格编辑器自己处理 ESC（退出编辑），此处不关闭面板；
+  // 右键菜单 / 补全建议 / 设置等模态浮层打开时也不抢占它们的 ESC。
+  const handleCloseRef = useRef(handleClose)
+  useEffect(() => {
+    handleCloseRef.current = handleClose
+  })
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return
+      const el = document.activeElement as HTMLElement | null
+      if (el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable)) return
+      if (document.querySelector('.modal-overlay, .ctx-menu, .suggest-menu')) return
+      handleCloseRef.current()
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
   /* ===================== 恢复上一个版本（回滚到保存前的备份） ===================== */
   async function handleRestore() {
     if (saving) return
@@ -1093,7 +1112,9 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
           q > 0 ? fmtNum(q) : '',
           p > 0 ? fmtNum(p) : '',
           a > 0 ? fmtNum(a) : '',
-          String(r.person ?? ''),
+          // 调货人列：AI 识别出的 person 仅用于"账单定位"（匹配并置顶对应 Excel 文件），
+          // 不应自动写入调货人列（识别结果表下方也未展示该字段），故此处留空，由用户按需手填。
+          '',
           String(r.remark ?? ''),
         ]
         pos += 1
@@ -1348,7 +1369,7 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
           >
             恢复上一版本
           </button>
-          <button className="btn btn-small btn-close" onClick={handleClose} title="Esc 关闭">
+          <button className="btn btn-outline" onClick={handleClose} title="Esc 关闭">
             关闭
           </button>
         </div>

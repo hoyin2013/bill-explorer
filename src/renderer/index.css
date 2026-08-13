@@ -1283,6 +1283,24 @@ body {
   color: #909399;
 }
 
+.detect-hint {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #b88230;
+  background: #fdf6ec;
+  border: 1px solid #faecd8;
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+.detect-hint-icon {
+  flex: 0 0 auto;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
 .image-status {
   font-size: 12px;
   color: #67c23a;

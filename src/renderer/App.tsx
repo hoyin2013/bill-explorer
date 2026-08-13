@@ -100,6 +100,14 @@ function AppInner({ api }: { api: ElectronAPI }) {
     return off
   }, [api])
 
+  // 关闭识图窗口时，清空主窗口左侧的文件名搜索框（避免残留旧的检索词）
+  useEffect(() => {
+    const off = api.on('image-window-closed', () => {
+      setQuery('')
+    })
+    return off
+  }, [api])
+
   // 识图窗口点"填入当前录入"时，若主窗口尚未打开任何账单文件，给出引导提示
   useEffect(() => {
     const off = api.on('apply-recognized-rows', (rows) => {
@@ -220,6 +228,7 @@ function AppInner({ api }: { api: ElectronAPI }) {
   // ---- 关闭录入面板 ----（关闭后视为一次独立编辑会话，下次保存回到"追加"）
   function onCloseMemo() {
     setActiveFile(null)
+    setQuery('') // 关闭录入面板即清空左侧文件搜索框，避免残留检索词
     setMemoStatus('')
     lastSavedFile.current = null
   }

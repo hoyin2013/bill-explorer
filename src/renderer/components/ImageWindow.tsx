@@ -110,6 +110,12 @@ export function ImageWindow({ api }: Props) {
   const [singleRotate, setSingleRotate] = useState(0) // 单张视图内手动微调旋转
   const [singleLoading, setSingleLoading] = useState(false) // 逐张识别中
   const [copyMsg, setCopyMsg] = useState('')
+  // 检测增强环境探测结果（ONNX 模型与运行时是否就绪）；null=尚未探测完成
+  const [detectEnv, setDetectEnv] = useState<{
+    modelExists: boolean
+    runtimeReady: boolean
+    detail: string
+  } | null>(null)
   // 预览缩放 / 平移状态
   const [zoom, setZoom] = useState(1)
   const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 })
@@ -122,22 +128,36 @@ export function ImageWindow({ api }: Props) {
   const zoomRef = useRef(1)
   const panRef = useRef({ x: 0, y: 0 })
   const draggingRef = useRef<{ startX: number; startY: number; panX: number; panY: number } | null>(null)
-  // 日期统一基准：首次编辑某张日期后记住，并同步到所有小票的每一行（识别日期不准，通常一图同日）
+  // 日期统一基准：首次编辑某张日期后记住，并同步到当时所有小票的每一行；
+  // 之后跨图片保留（不在 loadPreview / detectOnly 重置），后续识别默认套用该日期，
+  // 避免每次靠 OCR 识别日期带来的误差。
   const dateAnchorRef = useRef<string | null>(null)
 
   // 是否走"检测拆分"流程（用 tickets 作为数据源）；否则用 rows
   const usingTickets = tickets.length > 0
   const displayRows = usingTickets ? tickets.flatMap((t) => t.rows) : rows
 
+  // 检测增强环境是否不可用：探测完成后，运行时或模型任意缺失即不可用
+  const detectNoRuntime = detectEnv ? !detectEnv.runtimeReady : false
+  const detectUnavailable = detectEnv ? !detectEnv.runtimeReady || !detectEnv.modelExists : false
+  const detectHint = detectEnv && detectEnv.detail ? detectEnv.detail : ''
+
   // 把当前已识别的人名实时上报给主窗口（主窗口据此把对应 Excel 置顶）
   useEffect(() => {
     api.reportPersons(recognized)
   }, [recognized, api])
 
-  // 根据 displayRows 自动更新已识别人名
+  // 根据 displayRows 自动更新已识别人名。
+  // 单张视图下，只上报「当前正在查看的那张」小票的人名 —— 逐张识别时左侧「命中」置顶
+  // 才不会不断叠加；总览视图仍用全部小票的并集（便于「填入全部」批量核对）。
   useEffect(() => {
-    setRecognized(uniquePersons(displayRows))
-  }, [tickets, rows])
+    if (viewMode === 'single') {
+      const activeRows = tickets[active]?.rows ?? []
+      setRecognized(activeRows.length ? uniquePersons(activeRows) : [])
+    } else {
+      setRecognized(uniquePersons(displayRows))
+    }
+  }, [tickets, rows, viewMode, active])
 
   // 同步最新的 zoom/pan 到 ref（供原生事件处理器读取）
   useEffect(() => {
@@ -237,7 +257,8 @@ export function ImageWindow({ api }: Props) {
     setActive(0)
     setSingleRotate(0)
     setImgNatural({ w: 0, h: 0 })
-    dateAnchorRef.current = null
+    // 注意：不再重置 dateAnchorRef —— 第一张输入的日期要作为整场会话基准，
+    // 跨图片保留，后续识别默认套用该日期（避免每次识别误差）。
     setPreview('')
     zoomRef.current = 1
     panRef.current = { x: 0, y: 0 }
@@ -355,7 +376,7 @@ export function ImageWindow({ api }: Props) {
     setBoxes([])
     setTickets([])
     setRows([])
-    dateAnchorRef.current = null
+    // 注意：保留 dateAnchorRef（不重置），让日期基准跨图片延续
     setViewMode('overview')
     try {
       // 按当前旋转把预览图旋转后送检测，使检测图与展示图一致（框坐标对齐）
@@ -479,6 +500,29 @@ export function ImageWindow({ api }: Props) {
       .catch(() => setStatus('读取设置失败'))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // 挂载时探测检测增强环境，提前告知用户是否可用（而非点「检测」后才报错）
+  useEffect(() => {
+    api
+      .detectEnvironment()
+      .then(setDetectEnv)
+      .catch(() => setDetectEnv(null))
+  }, [api])
+
+  // 窗口即将关闭（pagehide，关闭前必触发）时通知主进程：
+  // 清空主窗口左侧搜索框 + 清除人名命中置顶。与 reportPersons 同一条已被验证可用的 IPC 路径，
+  // 比单纯依赖主进程 imageWindow.on('closed') 更可靠，确保「关闭录入窗口即清空搜索框」稳定生效。
+  useEffect(() => {
+    const onHide = () => {
+      try {
+        api.notifyImageClosing()
+      } catch {
+        /* 渲染进程即将卸载，忽略 */
+      }
+    }
+    window.addEventListener('pagehide', onHide)
+    return () => window.removeEventListener('pagehide', onHide)
+  }, [api])
 
   // 是否展示"来源"列：仅当结果来自多张不同图片时（单图识别不显示，避免冗余）
   const distinctSources = new Set(rows.map((r) => r.source).filter(Boolean))
@@ -785,12 +829,18 @@ export function ImageWindow({ api }: Props) {
                   <button
                     className="btn btn-primary"
                     onClick={() => detectOnly(selected)}
-                    disabled={aiLoading || !selected}
-                    title="先旋转到正向，再点此：用 YOLOv8 把每张小票框出来并裁剪（按当前旋转后的图）。点框可放大，再点「识别此张」读文字"
+                    disabled={aiLoading || !selected || detectNoRuntime}
+                    title="先旋转到正向，再点此：用训练好的 YOLOv8 模型（ONNX 运行时）把每张小票框出来并裁剪。点框可放大，再点「识别此张」读文字"
                   >
                     {aiLoading ? '检测中…' : '检测小票（画框）'}
                   </button>
                 </div>
+                {detectUnavailable && detectHint && (
+                  <div className="detect-hint">
+                    <span className="detect-hint-icon">⚠</span>
+                    <span>{detectHint}</span>
+                  </div>
+                )}
 
                 {boxes.length > 0 && (
                   <div className="detect-badge">

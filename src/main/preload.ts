@@ -70,6 +70,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   addApplied: (filePath: string, imagePath: string) => ipcRenderer.invoke('add-applied', filePath, imagePath),
   // 打开独立的小票识图窗口
   openImageWindow: () => ipcRenderer.invoke('open-image-window'),
+  // 探测检测增强的运行环境（Python / ultralytics / 模型是否就绪）
+  detectEnvironment: () => ipcRenderer.invoke('detect-environment'),
   // 订阅主进程事件（返回取消订阅函数）；用于接收 recognized-persons / apply-recognized-rows
   on: (channel: string, listener: (...args: unknown[]) => void) => {
     const sub = (_e: unknown, ...args: unknown[]) => listener(...args)
@@ -80,4 +82,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   reportPersons: (persons: string[]) => ipcRenderer.send('image:recognized-persons', persons),
   // 把识别结果回填到主窗口当前录入网格
   applyToMain: (rows: AIRecognizedRow[]) => ipcRenderer.send('image:apply-rows', rows),
+  // 识图窗口即将关闭时通知主进程（清空主窗口搜索框 + 清除命中置顶）
+  notifyImageClosing: () => ipcRenderer.send('image:closing'),
 })
