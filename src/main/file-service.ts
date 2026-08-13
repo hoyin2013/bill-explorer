@@ -32,6 +32,8 @@ export async function scanDirectory(rootDir: string): Promise<{
       const fullPath = join(dir, entry.name)
       // 跳过 . 开头的隐藏文件/目录
       if (entry.name.startsWith('.')) continue
+      // 跳过 Excel 临时锁文件（~$ 开头，如 ~$801 A6 范文华.xlsx）
+      if (entry.name.startsWith('~$')) continue
       if (entry.isDirectory()) {
         await walk(fullPath)
       } else if (entry.isFile()) {

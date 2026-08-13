@@ -45,6 +45,8 @@
     "files": [
       "dist/**/*",
       "dist-electron/**/*",
+      "scripts/**/*",
+      "models/**/*",
       "package.json"
     ],
     "win": {

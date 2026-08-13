@@ -44,6 +44,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
     aiConfig?: { baseURL?: string; apiKey?: string; model?: string; temperature?: number }
     imageDir?: string
     prompt?: string
+    pythonPath?: string
+    detectModel?: string
+    enableDetect?: boolean
   }) => ipcRenderer.invoke('save-settings', settings),
   // 选择图片目录
   selectImageDirectory: () => ipcRenderer.invoke('select-image-directory'),
@@ -51,8 +54,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
   listImages: (dir?: string) => ipcRenderer.invoke('list-images', dir),
   // 读取图片为 base64
   readImageBase64: (imagePath: string) => ipcRenderer.invoke('read-image-base64', imagePath),
+  // 获取当前账单目录的人名清单（文件名提取）
+  getNameList: () => ipcRenderer.invoke('get-name-list'),
   // AI 识别小票
   aiRecognize: (imagePath: string) => ipcRenderer.invoke('ai-recognize', imagePath),
+  // 仅检测小票边界框
+  aiDetect: (payload) => ipcRenderer.invoke('ai-detect', payload),
+  // 检测增强识别（检测 + 逐张裁剪 + AI）
+  aiRecognizeDetected: (payload) => ipcRenderer.invoke('ai-recognize-detected', payload),
+  // 仅识别单张裁剪小票
+  aiRecognizeCrop: (cropBase64: string) => ipcRenderer.invoke('ai-recognize-crop', cropBase64),
   // 读取某 Excel 已自动填入过的图片列表（去重用）
   getApplied: (filePath: string) => ipcRenderer.invoke('get-applied', filePath),
   // 记录某张图片已自动填入

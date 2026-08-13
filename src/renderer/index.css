@@ -1113,6 +1113,7 @@ body {
   justify-content: center;
   overflow: hidden;
   user-select: none;
+  position: relative;
 }
 .image-preview {
   max-width: 100%;
@@ -1134,10 +1135,49 @@ body {
   color: #606266;
   margin-left: 2px;
 }
+.image-rotate-badge {
+  font-size: 11px;
+  color: #909399;
+  margin-left: 4px;
+  padding: 1px 6px;
+  border: 1px solid #dcdfe6;
+  border-radius: 10px;
+  background: #f4f4f5;
+}
 .image-preview-hint {
   font-size: 11px;
   color: #a8abb2;
   text-align: center;
+}
+
+/* YOLOv8 检测框叠加层：与预览图共享同一 transform，viewBox 用原图像素尺寸，
+   preserveAspectRatio=meet 自动与 object-fit:contain 的预览图对齐 */
+.ticket-box-overlay {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 5;
+  pointer-events: none;
+}
+.ticket-box-overlay svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+/* 检测结果徽标 */
+.detect-badge {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: #1d6fd0;
+  background: #ecf5ff;
+  border: 1px solid #b3d6ff;
+  border-radius: 4px;
+  padding: 4px 8px;
+  align-self: flex-start;
 }
 
 /* 图片列表：独立窗口内的可见列表（替换原下拉框） */
@@ -1149,7 +1189,7 @@ body {
   gap: 10px;
 }
 .image-list-side {
-  flex: 0 0 170px;
+  flex: 0 0 auto;
   min-width: 0;
   display: flex;
   flex-direction: column;
@@ -1158,6 +1198,20 @@ body {
   border-radius: 6px;
   background: #fff;
   overflow: hidden;
+}
+/* 图片列表 / 预览区之间的可拖动分隔条 */
+.image-splitter {
+  flex: 0 0 6px;
+  align-self: stretch;
+  cursor: col-resize;
+  background: #ebeef5;
+  border-radius: 3px;
+  margin: 0 1px;
+  transition: background 0.15s;
+}
+.image-splitter:hover,
+.image-splitter:active {
+  background: #409eff;
 }
 .image-list-title {
   font-size: 12px;
@@ -1434,6 +1488,15 @@ body {
   border-radius: 4px;
   outline: none;
 }
+.form-row select.model-preset {
+  padding: 6px 10px;
+  font-size: 13px;
+  border: 1px solid #dcdfe6;
+  border-radius: 4px;
+  outline: none;
+  background: #fff;
+  cursor: pointer;
+}
 .form-row input[type="text"]:focus,
 .form-row input[type="password"]:focus {
   border-color: #409eff;
@@ -1459,6 +1522,34 @@ body {
 .form-hint {
   font-size: 11px;
   color: #909399;
+}
+.name-list-box {
+  border: 1px dashed #dcdfe6;
+  border-radius: 4px;
+  padding: 8px 10px;
+  min-height: 40px;
+  background: #fafafa;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.name-list-empty {
+  font-size: 12px;
+  color: #909399;
+}
+.name-list-count {
+  font-size: 12px;
+  color: #606266;
+}
+.name-chip {
+  display: inline-block;
+  padding: 2px 8px;
+  font-size: 12px;
+  color: #2d5b8c;
+  background: #eaf2fb;
+  border: 1px solid #cfe0f5;
+  border-radius: 12px;
 }
 .modal-status {
   font-size: 12px;
@@ -1533,6 +1624,18 @@ body {
   border: 1px solid #b3d6ff;
   border-radius: 10px;
 }
+.person-fixed {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 0 5px;
+  font-size: 10px;
+  line-height: 16px;
+  color: #fff;
+  background: #67c23a;
+  border-radius: 8px;
+  vertical-align: middle;
+  cursor: help;
+}
 .btn-link {
   background: transparent;
   border: none;
@@ -1544,4 +1647,170 @@ body {
 .btn-link:hover {
   color: #f56c6c;
 }
+
+/* ====== 检测框可点击提示 ====== */
+.ticket-box-rect:hover rect {
+  fill: rgba(64, 158, 255, 0.28);
+  stroke: #1d6fd0;
+  stroke-width: 3;
+}
+
+/* ====== 逐张小票缩略图条 ====== */
+.ticket-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  align-self: stretch;
+}
+.ticket-strip-title {
+  font-size: 12px;
+  color: #909399;
+}
+.ticket-strip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.ticket-thumb {
+  position: relative;
+  width: 92px;
+  height: 64px;
+  padding: 0;
+  border: 1px solid #dcdfe6;
+  border-radius: 4px;
+  background: #f4f5f7;
+  overflow: hidden;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.ticket-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.ticket-thumb:hover {
+  border-color: #409eff;
+}
+.ticket-thumb.active {
+  border: 2px solid #409eff;
+  box-shadow: 0 0 0 2px rgba(64, 158, 255, 0.25);
+}
+.ticket-thumb.unrec {
+  border-style: dashed;
+}
+.ticket-thumb-idx {
+  position: absolute;
+  left: 2px;
+  bottom: 2px;
+  font-size: 10px;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.55);
+  border-radius: 6px;
+  padding: 0 4px;
+}
+.ticket-thumb-flag {
+  position: absolute;
+  right: 2px;
+  top: 2px;
+  font-size: 9px;
+  color: #fff;
+  background: #e6a23c;
+  border-radius: 6px;
+  padding: 0 4px;
+}
+.ticket-thumb-no {
+  font-size: 11px;
+  color: #909399;
+}
+
+/* ====== 单张小票放大视图 ====== */
+.single-ticket-view {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-self: stretch;
+  min-width: 0;
+}
+.single-counter b {
+  color: #1d6fd0;
+}
+.single-person {
+  font-size: 12px;
+  color: #303133;
+  background: #ecf5ff;
+  border: 1px solid #b3d6ff;
+  border-radius: 10px;
+  padding: 0 8px;
+}
+.single-conf {
+  font-size: 12px;
+  color: #909399;
+}
+.single-rot {
+  font-size: 12px;
+  color: #67c23a;
+}
+.single-image-wrap {
+  width: 100%;
+  flex: 1 1 auto;
+  min-height: 180px;
+  max-height: 46vh;
+  background: #2b2b2b;
+  border: 1px solid #ebeef5;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: auto;
+  padding: 8px;
+}
+.single-image {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  transform-origin: center center;
+  transition: transform 0.2s;
+  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.4);
+}
+.single-rotate-bar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.single-info {
+  border: 1px solid #ebeef5;
+  border-radius: 6px;
+  padding: 8px;
+  background: #fff;
+}
+.single-info-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.single-empty {
+  font-size: 13px;
+  color: #909399;
+  padding: 14px 4px;
+  text-align: center;
+}
+.single-nav {
+  display: flex;
+  gap: 10px;
+  justify-content: center;
+  padding-top: 2px;
+}
+.single-nav .btn {
+  min-width: 120px;
+}
+.image-status.ok {
+  color: #67c23a;
+  background: #f0f9eb;
+  border: 1px solid #c2e7b0;
+}
+
 

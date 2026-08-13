@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { ElectronAPI, FileEntry, PreviewRow } from '../types'
-import { parsePersonFromFilename, personMatches } from '../utils/person'
+import { personMatches } from '../utils/person'
 
 interface Props {
   api: ElectronAPI
@@ -204,7 +204,9 @@ export function ResultList({
     const matched: Array<{ file: FileEntry; idx: number; hit: boolean }> = []
     const others: Array<{ file: FileEntry; idx: number; hit: boolean }> = []
     files.forEach((file, idx) => {
-      const hit = recognizedPersons.some((p) => personMatches(parsePersonFromFilename(file.fileName), p))
+      const hit = recognizedPersons.some((p) =>
+        personMatches(file.fileName.replace(/\.(xlsx|xls)$/i, ''), p),
+      )
       ;(hit ? matched : others).push({ file, idx, hit })
     })
     return [...matched, ...others]

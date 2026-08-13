@@ -4,7 +4,8 @@ import { join, basename } from 'path'
 import { scanDirectory, openFile, revealFile } from './file-service'
 import { appendRows, previewRows, updateRows, loadSheet, saveSheet, listBackups, restoreBackup } from './excel-memo'
 import { listImages, readImageBase64 } from './image-service'
-import { recognizeReceipt, DEFAULT_PROMPT, AIConfig, AIRecognizedRow } from './ai-service'
+import { recognizeReceipt, DEFAULT_PROMPT, AIConfig, AIRecognizedRow, buildNameList, buildAugmentedPrompt, correctPersonNames, recognizeTicketsWithDetection, recognizeSingleCrop, type RecognizedTicket } from './ai-service'
+import { getDefaultModelPath, detectTickets } from './detection'
 
 // 最近修改历史的单条记录
 interface HistoryRecord {
@@ -17,6 +18,10 @@ interface AppSettings {
   aiConfig?: AIConfig
   imageDir?: string
   prompt?: string
+  // 小票检测增强（YOLOv8）：本地检测模型逐张裁剪后再识别，提高识别率
+  pythonPath?: string
+  detectModel?: string
+  enableDetect?: boolean
 }
 
 // 历史记录最多保留条数
@@ -44,10 +49,14 @@ const store = new Store<{
             apiKey: { type: 'string', default: '' },
             model: { type: 'string', default: 'gpt-4o-mini' },
             temperature: { type: 'number', default: 0.2 },
+            fastMode: { type: 'boolean', default: true },
           },
         },
         imageDir: { type: 'string', default: '' },
         prompt: { type: 'string', default: DEFAULT_PROMPT },
+        pythonPath: { type: 'string', default: '' },
+        detectModel: { type: 'string', default: '' },
+        enableDetect: { type: 'boolean', default: true },
       },
     },
     // 已自动填入过的图片：filePath -> 图片路径数组，避免重复打开反复添加同一张
@@ -75,15 +84,23 @@ function addApplied(filePath: string, imagePath: string) {
 
 function getSettings(): AppSettings {
   const raw = store.get('settings') || {}
+  // 旧版默认提示词结构已变更（含"你是一位票据录入助手…"及上一版"识别不到则置 null"的 name 规则），
+  // 自动升级为新的默认提示词，仅对"从未自定义过"的用户生效；自定义过的不动。
+  let prompt = raw.prompt || DEFAULT_PROMPT
+  if (prompt.includes('你是一位票据录入助手') || prompt.includes('识别不到则置 null')) prompt = DEFAULT_PROMPT
   return {
     aiConfig: {
       baseURL: raw.aiConfig?.baseURL || '',
       apiKey: raw.aiConfig?.apiKey || '',
       model: raw.aiConfig?.model || 'gpt-4o-mini',
       temperature: typeof raw.aiConfig?.temperature === 'number' ? raw.aiConfig.temperature : 0.2,
+      fastMode: raw.aiConfig?.fastMode !== false,
     },
     imageDir: raw.imageDir || '',
-    prompt: raw.prompt || DEFAULT_PROMPT,
+    prompt,
+    pythonPath: raw.pythonPath || '',
+    detectModel: raw.detectModel || '',
+    enableDetect: typeof raw.enableDetect === 'boolean' ? raw.enableDetect : true,
   }
 }
 
@@ -98,10 +115,14 @@ function saveSettings(patch: AppSettings): void {
           temperature: typeof patch.aiConfig.temperature === 'number'
             ? patch.aiConfig.temperature
             : current.aiConfig?.temperature ?? 0.2,
+          fastMode: patch.aiConfig.fastMode !== undefined ? patch.aiConfig.fastMode : (current.aiConfig?.fastMode ?? true),
         }
       : current.aiConfig,
     imageDir: patch.imageDir !== undefined ? patch.imageDir : current.imageDir,
     prompt: patch.prompt !== undefined ? patch.prompt : current.prompt,
+    pythonPath: patch.pythonPath !== undefined ? patch.pythonPath : current.pythonPath,
+    detectModel: patch.detectModel !== undefined ? patch.detectModel : current.detectModel,
+    enableDetect: patch.enableDetect !== undefined ? patch.enableDetect : current.enableDetect,
   }
   store.set('settings', next)
 }
@@ -188,11 +209,15 @@ function createImageWindow() {
     imageWindow.focus()
     return
   }
+  const mb = mainWindow?.getBounds()
   imageWindow = new BrowserWindow({
-    width: 560,
-    height: 840,
-    minWidth: 420,
+    width: 620,
+    height: mb ? mb.height : 780,
+    minWidth: 460,
     minHeight: 560,
+    // 与主窗口等高、紧靠其右侧，打开更协调
+    x: mb ? mb.x + mb.width + 24 : undefined,
+    y: mb ? mb.y : undefined,
     title: '账单录入器 - 小票识图',
     show: true,
     webPreferences: {
@@ -437,10 +462,101 @@ ipcMain.handle('read-image-base64', (_event, imagePath: string) => {
 // ============ IPC 通道：AI 识别小票 ============
 ipcMain.handle('ai-recognize', async (_event, imagePath: string) => {
   const settings = getSettings()
+  // 遍历账单目录，取每个 Excel 的完整文件名作为清单（~ 开头的临时文件已由 scanDirectory 过滤）
+  const nameList = await buildNameList(store.get('workDir') || '')
   const base = readImageBase64(imagePath)
   if (base.error) return base
-  const res = await recognizeReceipt(base.base64 || '', settings.aiConfig || { baseURL: '', apiKey: '', model: '', temperature: 0.2 }, settings.prompt)
+  // 把文件名清单附加到提示词之后，让 AI 在已知范围内识别并做模糊匹配
+  const prompt = buildAugmentedPrompt(settings.prompt, nameList)
+  const res = await recognizeReceipt(base.base64 || '', settings.aiConfig || { baseURL: '', apiKey: '', model: '', temperature: 0.2 }, prompt)
+  // 识别完成后，把人名模糊匹配并修正为清单中的完整文件名写法
+  if (res.rows && res.rows.length) {
+    const { rows, corrected } = correctPersonNames(res.rows, nameList)
+    res.rows = rows
+    if (corrected > 0) {
+      res.message = (res.message ? res.message + '\n' : '') + `已按人名清单自动修正 ${corrected} 处人名`
+    }
+  }
   return res
+})
+
+// ============ IPC 通道：仅检测小票边界框（用矩形框标出每张小票，不调用 AI 识别） ============
+ipcMain.handle('ai-detect', async (_event, payload: { imagePath?: string; imageBase64?: string }) => {
+  const settings = getSettings()
+  const modelPath = settings.detectModel && settings.detectModel.trim() ? settings.detectModel.trim() : getDefaultModelPath()
+  const pythonPath = settings.pythonPath && settings.pythonPath.trim() ? settings.pythonPath.trim() : 'python'
+  const enableDetect = settings.enableDetect !== false
+  if (!enableDetect) {
+    return { ok: false, modelAvailable: false, message: '检测增强已关闭，请在设置中启用。', boxes: [], imageWidth: 0, imageHeight: 0 }
+  }
+  try {
+    const det = await detectTickets({ imagePath: payload.imagePath, imageBase64: payload.imageBase64, modelPath, pythonPath, crops: true })
+    if (!det.modelAvailable) {
+      return { ok: false, modelAvailable: false, message: det.message || '检测模型不可用', boxes: [], imageWidth: 0, imageHeight: 0, tickets: [] }
+    }
+    const tickets: RecognizedTicket[] = det.boxes.map((box, i) => ({
+      index: i + 1,
+      box,
+      crop: det.crops[i] || '',
+      angle: box.angle || 0,
+      rows: [],
+    }))
+    return {
+      ok: det.ok,
+      modelAvailable: true,
+      message: det.message,
+      boxes: det.boxes,
+      imageWidth: det.imageWidth,
+      imageHeight: det.imageHeight,
+      tickets,
+    }
+  } catch (err) {
+    return { ok: false, modelAvailable: false, message: err instanceof Error ? err.message : '检测失败', boxes: [], imageWidth: 0, imageHeight: 0, tickets: [] }
+  }
+})
+
+// ============ IPC 通道：仅识别单张裁剪小票（用于「先框出、再逐张识别」流程） ============
+ipcMain.handle('ai-recognize-crop', async (_event, cropBase64: string) => {
+  const settings = getSettings()
+  const nameList = await buildNameList(store.get('workDir') || '')
+  try {
+    const res = await recognizeSingleCrop(
+      cropBase64,
+      settings.aiConfig || { baseURL: '', apiKey: '', model: '', temperature: 0.2 },
+      settings.prompt,
+      nameList,
+    )
+    return res
+  } catch (err) {
+    return { error: true, message: err instanceof Error ? err.message : '单张识别失败' }
+  }
+})
+
+// ============ IPC 通道：检测增强识别（YOLOv8 框出小票 → 逐张裁剪 → AI 识别人名与内容） ============
+ipcMain.handle('ai-recognize-detected', async (_event, payload: { imagePath?: string; imageBase64?: string }) => {
+  const settings = getSettings()
+  const nameList = await buildNameList(store.get('workDir') || '')
+  const modelPath = settings.detectModel && settings.detectModel.trim() ? settings.detectModel.trim() : getDefaultModelPath()
+  const pythonPath = settings.pythonPath && settings.pythonPath.trim() ? settings.pythonPath.trim() : 'python'
+  const enableDetect = settings.enableDetect !== false
+  try {
+    const res = await recognizeTicketsWithDetection(
+      payload.imagePath || '',
+      settings.aiConfig || { baseURL: '', apiKey: '', model: '', temperature: 0.2 },
+      settings.prompt,
+      nameList,
+      { modelPath, pythonPath, enableDetect, imageBase64: payload.imageBase64 },
+    )
+    return res
+  } catch (err) {
+    return { error: true, message: err instanceof Error ? err.message : '检测增强识别失败', detected: false }
+  }
+})
+
+// ============ IPC 通道：获取当前账单目录的人名清单（供设置界面展示） ============
+ipcMain.handle('get-name-list', async () => {
+  const list = await buildNameList(store.get('workDir') || '')
+  return { names: list }
 })
 
 // 读取某 Excel 已自动填入过的图片列表（去重用）

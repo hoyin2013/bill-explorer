@@ -16,6 +16,8 @@ export interface AIConfig {
   apiKey: string
   model: string
   temperature: number
+  /** 快速模式：关闭模型思考/推理(reasoning)，加快响应；默认开启 */
+  fastMode?: boolean
 }
 
 // AI 识别出的单条小票字段
@@ -31,6 +33,8 @@ export interface AIRecognizedRow {
   remark?: string
   /** 仅前端使用：记录该结果来自哪张图片（多图扫描时便于核对），AI 不会返回此字段 */
   source?: string
+  /** 前端使用：人名是否已被「人名清单」自动修正过 */
+  personCorrected?: boolean
 }
 
 // 应用设置
@@ -38,6 +42,32 @@ export interface AppSettings {
   aiConfig: AIConfig
   imageDir: string
   prompt: string
+  // 小票检测增强（YOLOv8）相关
+  pythonPath?: string
+  detectModel?: string
+  enableDetect?: boolean
+}
+
+// YOLOv8 检测出的小票边界框（基于预览缩放图像素坐标）
+export interface DetectedBox {
+  x: number
+  y: number
+  w: number
+  h: number
+  conf: number
+  cls: number
+  label?: string
+  /** 该小票裁剪图被自动旋转的角度（度） */
+  angle?: number
+}
+
+// 单张拆分出来的小票（用于逐个放大查看与录入）
+export interface RecognizedTicket {
+  index: number
+  box: DetectedBox
+  crop: string
+  angle: number
+  rows: AIRecognizedRow[]
 }
 
 export interface ElectronAPI {
@@ -124,6 +154,9 @@ export interface ElectronAPI {
     aiConfig?: { baseURL?: string; apiKey?: string; model?: string; temperature?: number }
     imageDir?: string
     prompt?: string
+    pythonPath?: string
+    detectModel?: string
+    enableDetect?: boolean
   }) => Promise<{ error?: boolean; message?: string }>
   // 选择图片目录
   selectImageDirectory: () => Promise<string | null>
@@ -140,8 +173,40 @@ export interface ElectronAPI {
     base64?: string
     mime?: string
   }>
+  // 获取当前账单目录的人名清单（从文件名提取）
+  getNameList: () => Promise<{ names: string[] }>
   // AI 识别小票
   aiRecognize: (imagePath: string) => Promise<{
+    error?: boolean
+    message?: string
+    rows?: AIRecognizedRow[]
+  }>
+  // 仅检测小票边界框（返回矩形框 + 逐张裁剪图，用于在前端预览上画出并点击放大）。
+  // 可传 imageBase64（前端已旋转/缩放后的图），否则用 imagePath 读原图。
+  aiDetect: (payload: { imagePath?: string; imageBase64?: string }) => Promise<{
+    ok?: boolean
+    modelAvailable?: boolean
+    message?: string
+    boxes?: DetectedBox[]
+    imageWidth?: number
+    imageHeight?: number
+    tickets?: RecognizedTicket[]
+  }>
+  // 检测增强识别：YOLOv8 框出小票 → 逐张裁剪 → AI 识别（返回识别结果 + 框坐标 + 逐张小票）。
+  // 可传 imageBase64（前端已旋转/缩放后的图），否则用 imagePath 读原图。
+  aiRecognizeDetected: (payload: { imagePath?: string; imageBase64?: string }) => Promise<{
+    error?: boolean
+    message?: string
+    rows?: AIRecognizedRow[]
+    boxes?: DetectedBox[]
+    imageWidth?: number
+    imageHeight?: number
+    detected?: boolean
+    modelAvailable?: boolean
+    tickets?: RecognizedTicket[]
+  }>
+  // 仅识别单张裁剪小票（crop 为 base64 jpeg），用于「先框出、再逐张识别」流程
+  aiRecognizeCrop: (cropBase64: string) => Promise<{
     error?: boolean
     message?: string
     rows?: AIRecognizedRow[]

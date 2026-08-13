@@ -49,6 +49,32 @@ export function readImageBase64(filePath: string, maxWidth = 1600): { error?: bo
   }
 }
 
+// 把 base64 图片按最长边缩放到 maxDim 以内（JPEG），用于降低视觉模型的 token 消耗与推理耗时。
+// 已在阈值内则原样返回（避免无意义的重编码）。视觉模型按像素量计费视觉 token，
+// 单张小票裁剪图适度降采样通常不影响手写文字识别，却能显著省 token。
+export function downscaleImageBase64(
+  base64: string,
+  maxDim = 1280,
+  quality = 80,
+): string {
+  try {
+    const buf = Buffer.from(base64, 'base64')
+    const img = nativeImage.createFromBuffer(buf)
+    if (img.isEmpty()) return base64
+    const size = img.getSize()
+    const longest = Math.max(size.width, size.height)
+    if (longest <= maxDim) return base64
+    const scale = maxDim / longest
+    const resized = img.resize({
+      width: Math.max(1, Math.round(size.width * scale)),
+      height: Math.max(1, Math.round(size.height * scale)),
+    })
+    return resized.toJPEG(quality).toString('base64')
+  } catch {
+    return base64
+  }
+}
+
 export function imageFileName(filePath: string): string {
   return basename(filePath)
 }
