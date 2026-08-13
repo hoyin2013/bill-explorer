@@ -80,8 +80,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   reportPersons: (persons: string[]) => ipcRenderer.send('image:recognized-persons', persons),
   // 把识别结果回填到主窗口当前录入网格
   applyToMain: (rows: AIRecognizedRow[]) => ipcRenderer.send('image:apply-rows', rows),
-  // 把「小票识图」面板拆成独立窗口
-  openImageDetached: () => ipcRenderer.invoke('open-image-detached'),
-  // 把独立识图窗口合并回主窗口
-  attachImageDetached: () => ipcRenderer.invoke('attach-image-detached'),
+  // 把「小票识图」面板拆成独立窗口（携带当前状态快照）
+  openImageDetached: (state) => ipcRenderer.invoke('open-image-detached', state),
+  // 把独立识图窗口合并回主窗口（携带最新状态快照）
+  attachImageDetached: (state) => ipcRenderer.invoke('attach-image-detached', state),
+  // 独立窗口启动时拉取拆分时传入的状态快照
+  getDetachedInit: () => ipcRenderer.invoke('get-detached-init'),
+  // 独立窗口关闭前回传最新状态（X 关闭 / 页面卸载时触发）
+  detachedStateUpdate: (state) => ipcRenderer.send('detached-state-update', state),
 })

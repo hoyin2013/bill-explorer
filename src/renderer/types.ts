@@ -70,6 +70,29 @@ export interface RecognizedTicket {
   rows: AIRecognizedRow[]
 }
 
+// 「小票识图」窗口的可序列化状态快照：用于拆分/合并独立窗口时保留已识别结果与进度
+export interface ImageSnapshot {
+  imageDir: string
+  images: Array<{ name: string; path: string }>
+  selected: string
+  preview: string
+  rotate: number
+  rows: AIRecognizedRow[]
+  boxes: DetectedBox[]
+  imgNatural: { w: number; h: number }
+  tickets: RecognizedTicket[]
+  viewMode: 'overview' | 'single'
+  active: number
+  singleRotate: number
+  recogState: Record<number, 'pending' | 'busy' | 'done' | 'error'>
+  zoom: number
+  pan: { x: number; y: number }
+  singleZoom: number
+  singlePan: { x: number; y: number }
+  listWidth: number
+  dateAnchor: string | null
+}
+
 export interface ElectronAPI {
   selectDirectory: () => Promise<string | null>
   getWorkDir: () => Promise<string>
@@ -228,10 +251,14 @@ export interface ElectronAPI {
   reportPersons: (persons: string[]) => void
   // 识图窗口 → 主进程：把识别结果回填到主窗口当前打开的录入网格（用户主动点击才触发）
   applyToMain: (rows: AIRecognizedRow[]) => void
-  // 把「小票识图」面板拆成独立窗口（主进程创建 BrowserWindow）
-  openImageDetached: () => Promise<void>
-  // 把独立识图窗口合并回主窗口（主进程关闭该窗口；关闭后主窗口自动恢复面板）
-  attachImageDetached: () => Promise<void>
+  // 把「小票识图」面板拆成独立窗口（携带当前状态快照，主进程创建 BrowserWindow 后回传）
+  openImageDetached: (state: ImageSnapshot) => Promise<void>
+  // 把独立识图窗口合并回主窗口（携带最新状态快照，主进程关闭该窗口并把状态回传给主窗口）
+  attachImageDetached: (state: ImageSnapshot) => Promise<void>
+  // 独立窗口启动时拉取拆分时传入的状态快照（保留结果与进度）
+  getDetachedInit: () => Promise<ImageSnapshot | null>
+  // 独立窗口关闭前回传最新状态（X 关闭 / 页面卸载时触发），保证主窗口合并回的是最新结果
+  detachedStateUpdate: (state: ImageSnapshot) => void
 }
 
 export interface FileEntry {

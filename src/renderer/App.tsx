@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { ElectronAPI, FileEntry, HistoryRecord } from './types'
+import { ElectronAPI, FileEntry, HistoryRecord, ImageSnapshot } from './types'
 import { filterFiles } from './utils'
 import { DirectoryBar } from './components/DirectoryBar'
 import { ResultList } from './components/ResultList'
 import { SheetGrid } from './components/SheetGrid'
-import { ImageWindow } from './components/ImageWindow'
+import { ImageWindow, type ImageWindowHandle } from './components/ImageWindow'
 import { ErrorMessage } from './components/ErrorMessage'
 import { HistoryList } from './components/HistoryList'
 import { SettingsModal } from './components/SettingsModal'
@@ -45,13 +45,50 @@ export default function App() {
 
 // 独立「小票识图」窗口：仅渲染 ImageWindow，并带「合并回主窗口」能力
 function DetachedImageApp({ api }: { api: ElectronAPI }) {
+  const [init, setInit] = useState<ImageSnapshot | null>(null)
+  const [failed, setFailed] = useState(false)
+  useEffect(() => {
+    let alive = true
+    let settled = false
+    api
+      .getDetachedInit()
+      .then((s) => {
+        settled = true
+        if (alive && s) setInit(s as ImageSnapshot)
+      })
+      .catch(() => {
+        settled = true
+        if (alive) setFailed(true)
+      })
+    // 兜底：若 3 秒内仍未取回快照（极端情况），升级为空白面板渲染，避免一直卡在加载
+    const t = setTimeout(() => {
+      if (alive && !settled) setFailed(true)
+    }, 3000)
+    return () => {
+      alive = false
+      clearTimeout(t)
+    }
+  }, [api])
+
+  // 取回快照前先不渲染内容，避免「先空白再填充」的闪烁；
+  // 快照到位后 ImageWindow 首帧即带 initialState，配合 useLayoutEffect 在绘制前完成恢复。
+  if (!init) {
+    return (
+      <div className="detached-root">
+        <div className="detached-loading">
+          {failed ? '未能载入识图内容，请重新点「拆分窗口」' : '正在载入识图内容…'}
+        </div>
+      </div>
+    )
+  }
   return (
     <div className="detached-root">
       <ImageWindow
         api={api}
         detached
-        onAttach={() => {
-          api.attachImageDetached()
+        initialState={init}
+        onAttach={(state) => {
+          api.attachImageDetached(state)
           window.close()
         }}
       />
@@ -82,6 +119,9 @@ function AppInner({ api }: { api: ElectronAPI }) {
   const [showImagePanel, setShowImagePanel] = useState(true)
   const [imgWidth, setImgWidth] = useState(360)
   const imgSplitDragRef = useRef<{ startX: number; startW: number } | null>(null)
+  // 是否已把识图面板拆成独立窗口（拆分后主窗口面板隐藏但保持挂载，以保留结果与进度）
+  const [isDetached, setIsDetached] = useState(false)
+  const imageWinRef = useRef<ImageWindowHandle>(null)
 
   // 识图窗口上报的"已识别人名"，用于把左侧列表中对应 Excel 置顶
   const [recognizedPersons, setRecognizedPersons] = useState<string[]>([])
@@ -136,16 +176,24 @@ function AppInner({ api }: { api: ElectronAPI }) {
     return off
   }, [api])
 
-  // 独立「小票识图」窗口关闭时，恢复右侧面板显示
+  // 独立「小票识图」窗口关闭时，取消 detached 标记，右侧面板恢复可见（状态始终保留在隐藏面板中）
   useEffect(() => {
-    const off = api.on('image-detached-closed', () => setShowImagePanel(true))
+    const off = api.on('image-detached-closed', () => setIsDetached(false))
     return off
   }, [api])
 
-  // 把右侧「小票识图」面板拆成独立窗口（自身先隐藏，避免重复显示）
-  function handleDetach() {
-    setShowImagePanel(false)
-    api.openImageDetached()
+  // 独立窗口「合并回主窗口」时，把独立窗口里最新的结果/进度同步回主面板
+  useEffect(() => {
+    const off = api.on('image-detached-merged', (state) => {
+      imageWinRef.current?.restoreState(state as ImageSnapshot)
+    })
+    return off
+  }, [api])
+
+  // 把右侧「小票识图」面板拆成独立窗口（自身先隐藏，但保持挂载以保留结果与进度）
+  function handleDetach(state: ImageSnapshot) {
+    setIsDetached(true)
+    api.openImageDetached(state)
   }
 
   async function loadSettings() {
@@ -461,15 +509,20 @@ function AppInner({ api }: { api: ElectronAPI }) {
           )}
         </main>
 
-        {showImagePanel && (
+        {(showImagePanel || isDetached) && (
           <>
-            <div
-              className="pane-splitter"
-              onMouseDown={onImgSplitterDown}
-              title="拖动调整右侧「小票识图」面板宽度"
-            />
-            <aside className="image-panel-col" style={{ width: imgWidth }}>
-              <ImageWindow api={api} onDetach={handleDetach} />
+            {!isDetached && (
+              <div
+                className="pane-splitter"
+                onMouseDown={onImgSplitterDown}
+                title="拖动调整右侧「小票识图」面板宽度"
+              />
+            )}
+            <aside
+              className={'image-panel-col' + (isDetached ? ' detached-hidden' : '')}
+              style={{ width: imgWidth }}
+            >
+              <ImageWindow ref={imageWinRef} api={api} onDetach={handleDetach} />
             </aside>
           </>
         )}

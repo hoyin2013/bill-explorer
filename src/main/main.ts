@@ -6,6 +6,7 @@ import { appendRows, previewRows, updateRows, loadSheet, saveSheet, listBackups,
 import { listImages, readImageBase64 } from './image-service'
 import { recognizeReceipt, DEFAULT_PROMPT, AIConfig, AIRecognizedRow, buildNameList, buildAugmentedPrompt, correctPersonNames, recognizeTicketsWithDetection, recognizeSingleCrop, type RecognizedTicket } from './ai-service'
 import { getDefaultModelPath, detectTickets, detectEnvironment } from './detection'
+import type { ImageSnapshot } from '../renderer/types'
 
 // 最近修改历史的单条记录
 interface HistoryRecord {
@@ -180,6 +181,8 @@ const DIST_HTML = join(__dirname, '../dist/index.html')
 let mainWindow: BrowserWindow | null = null
 // 「小票识图」独立窗口（从主窗口右侧面板拆出来，方便在大屏单独查看）
 let detachedImageWin: BrowserWindow | null = null
+// 拆分时由主窗口传入的状态快照，独立窗口启动后通过 get-detached-init 取回，以保留结果/进度
+let pendingDetachedState: ImageSnapshot | null = null
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -230,8 +233,13 @@ function createDetachedImageWindow() {
   }
   win.on('closed', () => {
     detachedImageWin = null
+    // 关闭前若独立窗口已回传最新状态（点「合并」或 X 关闭前），先恢复到主窗口保留工作成果
+    if (pendingDetachedState) {
+      mainWindow?.webContents.send('image-detached-merged', pendingDetachedState)
+    }
     // 通知主窗口：独立窗口已关闭，请恢复右侧「小票识图」面板
     mainWindow?.webContents.send('image-detached-closed')
+    pendingDetachedState = null
   })
   detachedImageWin = win
 }
@@ -588,13 +596,25 @@ ipcMain.on('image:apply-rows', (_event, rows: unknown) => {
 })
 
 // ============ 独立「小票识图」窗口：拆分 / 合并 ============
-// 把右侧面板拆成独立窗口（方便在大屏单独查看 / 对照录入）
-ipcMain.handle('open-image-detached', () => {
+// 把右侧面板拆成独立窗口（携带当前状态快照，独立窗口启动后取回以保留结果/进度）
+ipcMain.handle('open-image-detached', (_event, state: unknown) => {
+  pendingDetachedState = (state as ImageSnapshot) ?? null
   createDetachedImageWindow()
 })
 
-// 把独立窗口合并回主窗口：关闭该窗口，其 closed 事件会通知主窗口恢复面板
-ipcMain.handle('attach-image-detached', () => {
+// 独立窗口启动时拉取拆分时传入的状态快照
+ipcMain.handle('get-detached-init', () => {
+  return pendingDetachedState
+})
+
+// 独立窗口关闭前回传最新状态（X 关闭 / 页面卸载时触发），保证主窗口合并回的是最新结果
+ipcMain.on('detached-state-update', (_event, state: unknown) => {
+  pendingDetachedState = (state as ImageSnapshot) ?? pendingDetachedState
+})
+
+// 把独立窗口合并回主窗口：记录最新状态后关闭该窗口，closed 事件会统一把最新状态恢复回主窗口
+ipcMain.handle('attach-image-detached', (_event, state: unknown) => {
+  pendingDetachedState = (state as ImageSnapshot) ?? pendingDetachedState
   if (detachedImageWin && !detachedImageWin.isDestroyed()) {
     detachedImageWin.close()
   }

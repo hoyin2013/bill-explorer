@@ -1066,6 +1066,10 @@ body {
   background: #f5f6f8;
   overflow: hidden;
 }
+/* 拆分成独立窗口时，主窗口侧的面板保持挂载（保留状态）但隐藏，避免重复显示 */
+.image-panel-col.detached-hidden {
+  display: none;
+}
 
 .image-panel {
   flex: 1 1 auto;
@@ -1120,6 +1124,11 @@ body {
   height: 100vh;
   display: flex;
   background: #f5f6f8;
+}
+.detached-loading {
+  margin: auto;
+  color: #909399;
+  font-size: 14px;
 }
 
 /* 顶部工具栏里旋转与缩放之间的一根小分隔线 */
@@ -1774,6 +1783,12 @@ body {
 .ticket-thumb.unrec {
   border-style: dashed;
 }
+.ticket-thumb.busy {
+  border-color: #409eff;
+}
+.ticket-thumb.err {
+  border-color: #f56c6c;
+}
 .ticket-thumb-idx {
   position: absolute;
   left: 2px;
@@ -1793,6 +1808,39 @@ body {
   background: #e6a23c;
   border-radius: 6px;
   padding: 0 4px;
+}
+.ticket-thumb-flag.busy {
+  background: #409eff;
+}
+.ticket-thumb-flag.err {
+  background: #f56c6c;
+}
+
+/* ====== 后台识别指示条 ====== */
+.bg-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: 8px;
+  padding: 3px 8px;
+  background: #ecf5ff;
+  border: 1px solid #b3d6ff;
+  border-radius: 14px;
+  font-size: 12px;
+  color: #1d6fd0;
+}
+.bg-spinner {
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgba(64, 158, 255, 0.35);
+  border-top-color: #409eff;
+  border-radius: 50%;
+  animation: bg-spin 0.8s linear infinite;
+}
+@keyframes bg-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 .ticket-thumb-no {
   font-size: 11px;

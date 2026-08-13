@@ -1,11 +1,19 @@
-import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type MutableRefObject } from 'react'
-import { ElectronAPI, AIRecognizedRow, DetectedBox, RecognizedTicket } from '../types'
+import { forwardRef, useEffect, useImperativeHandle, useLayoutEffect, useRef, useState, type MouseEvent as ReactMouseEvent, type MutableRefObject } from 'react'
+import { ElectronAPI, AIRecognizedRow, DetectedBox, RecognizedTicket, ImageSnapshot } from '../types'
 
 interface Props {
   api: ElectronAPI
   detached?: boolean
-  onDetach?: () => void
-  onAttach?: () => void
+  onDetach?: (state: ImageSnapshot) => void
+  onAttach?: (state: ImageSnapshot) => void
+  // 独立窗口启动时由主进程回传的拆分前状态快照（保留结果与进度）
+  initialState?: ImageSnapshot
+}
+
+// 暴露给父组件的命令式句柄：用于拆分/合并窗口时抓取与恢复整块状态
+export interface ImageWindowHandle {
+  captureState: () => ImageSnapshot
+  restoreState: (s: ImageSnapshot) => void
 }
 
 // 从一批识别结果里提取去重后的客户人名。
@@ -90,7 +98,10 @@ const RESULT_COLS: Array<{ field: keyof AIRecognizedRow; label: string; w: strin
   { field: 'amount', label: '金额', w: '82px' },
 ]
 
-export function ImageWindow({ api, detached, onDetach, onAttach }: Props) {
+export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWindow(
+  { api, detached, onDetach, onAttach, initialState },
+  ref,
+) {
   const [imageDir, setImageDir] = useState('')
   const [images, setImages] = useState<Array<{ name: string; path: string }>>([])
   const [selected, setSelected] = useState('')
@@ -111,8 +122,19 @@ export function ImageWindow({ api, detached, onDetach, onAttach }: Props) {
   const [viewMode, setViewMode] = useState<'overview' | 'single'>('overview')
   const [active, setActive] = useState(0) // 当前查看的 ticket 下标
   const [singleRotate, setSingleRotate] = useState(0) // 单张视图内手动微调旋转
-  const [singleLoading, setSingleLoading] = useState(false) // 逐张识别中
   const [copyMsg, setCopyMsg] = useState('')
+  // 逐张识别的队列与状态（后台顺序识别，不阻塞前台操作）：
+  // recogState[i] 标记每张小票的识别状态；bgRunning 表示后台队列正在跑。
+  const [recogState, setRecogState] = useState<Record<number, 'pending' | 'busy' | 'done' | 'error'>>({})
+  const [bgRunning, setBgRunning] = useState(false)
+  // tickets 的实时镜像（供异步队列读取最新裁剪图 / 已识别结果，避免闭包读到旧值）
+  const ticketsRef = useRef<RecognizedTicket[]>([])
+  // 后台识别队列管理器：queue=待处理下标，running=是否有循环在跑，cancelled=取消
+  const recogMgr = useRef<{ queue: number[]; running: boolean; cancelled: boolean }>({
+    queue: [],
+    running: false,
+    cancelled: false,
+  })
   // 单张小票图片点击放大：全屏查看（lightbox）
   const [lightbox, setLightbox] = useState(false)
   // 检测增强环境探测结果（ONNX 模型与运行时是否就绪）；null=尚未探测完成
@@ -155,6 +177,86 @@ export function ImageWindow({ api, detached, onDetach, onAttach }: Props) {
   // 避免每次靠 OCR 识别日期带来的误差。
   const dateAnchorRef = useRef<string | null>(null)
 
+  // 抓取当前整块状态（用于拆分窗口时把已识别结果与进度带过去）
+  function captureState(): ImageSnapshot {
+    return {
+      imageDir,
+      images,
+      selected,
+      preview,
+      rotate,
+      rows,
+      boxes,
+      imgNatural,
+      tickets,
+      viewMode,
+      active,
+      singleRotate,
+      recogState,
+      zoom,
+      pan,
+      singleZoom,
+      singlePan,
+      listWidth,
+      dateAnchor: dateAnchorRef.current,
+    }
+  }
+
+  // 从快照恢复整块状态（独立窗口启动时 / 合并回主窗口时复用，保留结果与进度）
+  function restoreState(s: ImageSnapshot) {
+    setImageDir(s.imageDir ?? '')
+    setImages(s.images ?? [])
+    setSelected(s.selected ?? '')
+    setPreview(s.preview ?? '')
+    setRotate(s.rotate ?? 0)
+    setRows(s.rows ?? [])
+    setBoxes(s.boxes ?? [])
+    setImgNatural(s.imgNatural ?? { w: 0, h: 0 })
+    setTickets(s.tickets ?? [])
+    setViewMode(s.viewMode ?? 'overview')
+    setActive(s.active ?? 0)
+    setSingleRotate(s.singleRotate ?? 0)
+    setRecogState(s.recogState ?? {})
+    setZoom(s.zoom ?? 1)
+    setPan(s.pan ?? { x: 0, y: 0 })
+    setSingleZoom(s.singleZoom ?? 1)
+    setSinglePan(s.singlePan ?? { x: 0, y: 0 })
+    setListWidth(s.listWidth ?? 124)
+    dateAnchorRef.current = s.dateAnchor ?? null
+    // 复位后台识别队列与瞬时过渡，避免残留动画 / 重复识别
+    recogMgr.current.cancelled = true
+    recogMgr.current.running = false
+    recogMgr.current.queue = []
+    setBgRunning(false)
+    setInstant(true)
+  }
+
+  useImperativeHandle(ref, () => ({ captureState, restoreState }), [captureState, restoreState])
+
+  // 独立窗口：启动时用主进程回传的快照恢复结果与进度。
+  // 用 useLayoutEffect 在首帧绘制前完成恢复，避免「先空白再填充」的闪烁，
+  // 保证独立窗口打开即是主面板当时的内容（检测框、当前第几张、已识别结果都一致）。
+  useLayoutEffect(() => {
+    if (initialState) restoreState(initialState)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialState])
+
+  // 独立窗口：X 关闭 / 页面卸载前，把最新状态回传主进程，确保合并回主窗口的是最新进度
+  const captureRef = useRef(captureState)
+  captureRef.current = captureState
+  useEffect(() => {
+    if (!detached) return
+    const onBeforeUnload = () => {
+      try {
+        api.detachedStateUpdate(captureRef.current())
+      } catch {
+        /* 忽略关闭瞬间的回传失败 */
+      }
+    }
+    window.addEventListener('beforeunload', onBeforeUnload)
+    return () => window.removeEventListener('beforeunload', onBeforeUnload)
+  }, [detached, api])
+
   // 是否走"检测拆分"流程（用 tickets 作为数据源）；否则用 rows
   const usingTickets = tickets.length > 0
   const displayRows = usingTickets ? tickets.flatMap((t) => t.rows) : rows
@@ -190,6 +292,18 @@ export function ImageWindow({ api, detached, onDetach, onAttach }: Props) {
       setRecognized(uniquePersons(displayRows))
     }
   }, [tickets, rows, viewMode, active])
+
+  // 同步 tickets 最新值到 ref，供后台识别队列读取（避免异步闭包读到过期快照）
+  useEffect(() => {
+    ticketsRef.current = tickets
+  }, [tickets])
+
+  // 组件卸载（如独立窗口关闭）时取消后台识别队列，避免对已卸载组件 setState
+  useEffect(() => {
+    return () => {
+      recogMgr.current.cancelled = true
+    }
+  }, [])
 
   // 同步最新的 zoom/pan 到 ref（供原生事件处理器读取）
   useEffect(() => {
@@ -600,6 +714,12 @@ export function ImageWindow({ api, detached, onDetach, onAttach }: Props) {
     setBoxes([])
     setTickets([])
     setRows([])
+    // 检测会重建整组小票：清空上一批的识别状态与后台队列，避免旧任务串到新小票上
+    recogMgr.current.cancelled = true
+    recogMgr.current.queue = []
+    recogMgr.current.running = false
+    setBgRunning(false)
+    setRecogState({})
     // 注意：保留 dateAnchorRef（不重置），让日期基准跨图片延续
     setViewMode('overview')
     try {
@@ -629,46 +749,122 @@ export function ImageWindow({ api, detached, onDetach, onAttach }: Props) {
     }
   }
 
-  // 打开单张小票视图（仅放大，不自动识别；识别由用户点「识别此张」触发）
+  // 打开单张小票视图，并触发识别：本张优先识别，其余小票在后台顺序识别（不阻塞前台）。
   function openTicket(i: number) {
     if (i < 0 || i >= tickets.length) return
     setActive(i)
     setSingleRotate(0)
     resetSingleView()
     setViewMode('single')
+    // 本张优先入队；其余顺序加入后台队列（已识别的会跳过）
+    enqueueRecognition([i], true)
+    const others = tickets.map((_, idx) => idx).filter((idx) => idx !== i)
+    enqueueRecognition(others, false)
   }
 
-  // 逐张识别：对检测出来但还没识别的小票，调用 AI 识别这一张裁剪图
-  async function recognizeThisCrop(i: number) {
-    const t = tickets[i]
+  // 把若干小票加入后台识别队列（去重：已识别 / 已在队列中的跳过）。
+  // front=true 表示优先识别（如用户刚点击的那张）。全部顺序处理，不阻塞前台操作。
+  function enqueueRecognition(indices: number[], front = false) {
+    if (!ticketsRef.current.length) return
+    const toAdd: number[] = []
+    for (const i of indices) {
+      const hasRows = (ticketsRef.current[i]?.rows.length ?? 0) > 0
+      if (hasRows) continue
+      if (recogMgr.current.queue.includes(i)) continue
+      toAdd.push(i)
+    }
+    if (toAdd.length === 0) return
+    setRecogState((p) => {
+      const np = { ...p }
+      for (const i of toAdd) if (np[i] !== 'busy') np[i] = 'pending'
+      return np
+    })
+    if (front) recogMgr.current.queue.unshift(...toAdd)
+    else recogMgr.current.queue.push(...toAdd)
+    if (!recogMgr.current.running) {
+      recogMgr.current.running = true
+      recogMgr.current.cancelled = false
+      setBgRunning(true)
+      void drainRecognition()
+    }
+  }
+
+  // 后台顺序识别循环：一次只识别一张，逐个 await，期间不阻塞 UI；
+  // 用户在队列跑动时仍可随意点击其它小票（会被重新插到队首优先识别）。
+  async function drainRecognition() {
+    const mgr = recogMgr.current
+    let processed = 0
+    while (mgr.queue.length > 0 && !mgr.cancelled) {
+      const i = mgr.queue.shift()!
+      // 再次确认：若已被识别（例如用户刚手动识别过 / 已缓存），直接跳过
+      if ((ticketsRef.current[i]?.rows.length ?? 0) > 0) {
+        setRecogState((p) => ({ ...p, [i]: 'done' }))
+        continue
+      }
+      setStatus(`正在后台识别第 ${i + 1} 张小票…（队列剩余 ${mgr.queue.length} 张）`)
+      await recognizeTicketByIdx(i)
+      processed++
+    }
+    mgr.running = false
+    setBgRunning(false)
+    if (!mgr.cancelled && processed > 0) {
+      setStatus(`后台识别完成：本组共识别 ${processed} 张小票，结果已缓存，可直接录入`)
+    }
+  }
+
+  // 取消后台识别（当前这张识别完即停，不再处理后续队列）
+  function cancelRecognition() {
+    recogMgr.current.cancelled = true
+    recogMgr.current.queue = []
+    recogMgr.current.running = false
+    setBgRunning(false)
+    setStatus('已取消后台识别队列')
+  }
+
+  // 核心：识别第 i 张小票（前台 / 后台共用）。
+  // 日期规则：仅「首张被识别」的小票贡献日期作为全局基准；之后所有小票的日期都套用
+  // 该基准（不各自再识别日期），保证一整组小票使用同一日期。
+  async function recognizeTicketByIdx(i: number) {
+    const t = ticketsRef.current[i]
     if (!t || !t.crop) {
-      setStatus('该小票没有可用的裁剪图')
+      setRecogState((p) => ({ ...p, [i]: 'error' }))
+      setStatus(`第 ${i + 1} 张没有可用的裁剪图`)
       return
     }
-    setSingleLoading(true)
-    setStatus(`正在识别第 ${i + 1} 张小票…`)
+    setRecogState((p) => ({ ...p, [i]: 'busy' }))
     try {
       const res = await api.aiRecognizeCrop(t.crop)
       if (res.error) {
-        setStatus(res.message || '识别失败')
-      } else {
-        const src = baseName(selected)
-        // 备注(remark)按需求留空，不追加「#序号」（小票序号由 tickets[].index 承载）
-        // 已设过统一日期基准时，把新识别出的小票日期也套用基准，保持一致
-        const anchor = dateAnchorRef.current
-        const rs = (res.rows || []).map((r) => ({ ...r, source: src, date: anchor ?? r.date }))
-        setTickets((prev) => {
-          const next = prev.slice()
-          next[i] = { ...next[i], rows: rs }
-          return next
-        })
-        setStatus(`第 ${i + 1} 张识别完成，共 ${rs.length} 条记录` + (res.message ? '\n' + res.message : ''))
+        setStatus(res.message || `第 ${i + 1} 张识别失败`)
+        setRecogState((p) => ({ ...p, [i]: 'error' }))
+        return
       }
+      const src = baseName(selected)
+      let rs = (res.rows || []).map((r) => ({ ...r, source: src }))
+      // 日期基准：仅首张贡献日期；其余套用基准，丢弃各自识别出的日期
+      const anchor = dateAnchorRef.current
+      if (anchor == null) {
+        const firstDate = rs.find((r) => (r.date || '').trim())?.date?.trim()
+        if (firstDate) dateAnchorRef.current = firstDate
+        rs = rs.map((r) => ({ ...r, date: dateAnchorRef.current ?? r.date }))
+      } else {
+        rs = rs.map((r) => ({ ...r, date: anchor }))
+      }
+      setTickets((prev) => {
+        const next = prev.slice()
+        next[i] = { ...next[i], rows: rs }
+        return next
+      })
+      setRecogState((p) => ({ ...p, [i]: 'done' }))
     } catch (err) {
       setStatus('识别失败：' + (err instanceof Error ? err.message : '未知错误'))
-    } finally {
-      setSingleLoading(false)
+      setRecogState((p) => ({ ...p, [i]: 'error' }))
     }
+  }
+
+  // 逐张识别：对检测出来但还没识别的小票，调用 AI 识别这一张裁剪图（前台手动触发，走队列）
+  function recognizeThisCrop(i: number) {
+    enqueueRecognition([i], true)
   }
 
   // 复制文本到剪贴板
@@ -713,6 +909,9 @@ export function ImageWindow({ api, detached, onDetach, onAttach }: Props) {
 
   // 初始化：读取设置中的图片目录
   useEffect(() => {
+    // 独立窗口（带 initialState）的状态已由 useLayoutEffect 的 restoreState 恢复，
+    // 不能再自动 loadImages，否则会把 selected 重置到第一张、并清空已识别的 tickets/rows
+    if (initialState) return
     api
       .getSettings()
       .then((s) => {
@@ -741,6 +940,8 @@ export function ImageWindow({ api, detached, onDetach, onAttach }: Props) {
   const activeTicket = tickets[active]
   const isLast = active >= tickets.length - 1
   const isFirst = active <= 0
+  // 当前单张是否正在识别（前台/后台共用此状态，取代原 singleLoading）
+  const singleBusy = recogState[active] === 'busy'
 
   return (
     <div className="image-window">
@@ -751,16 +952,16 @@ export function ImageWindow({ api, detached, onDetach, onAttach }: Props) {
             {detached ? (
               <button
                 className="btn btn-small btn-outline"
-                onClick={onAttach}
-                title="把本窗口合并回主窗口右侧面板"
+                onClick={() => onAttach?.(captureState())}
+                title="把本窗口合并回主窗口右侧面板（保留此处的结果与进度）"
               >
                 ⎘ 合并回主窗口
               </button>
             ) : (
               <button
                 className="btn btn-small btn-outline"
-                onClick={onDetach}
-                title="把本面板拆成独立窗口，方便在大屏上单独查看 / 对照录入"
+                onClick={() => onDetach?.(captureState())}
+                title="把本面板拆成独立窗口，方便在大屏上单独查看 / 对照录入（保留当前结果与进度）"
               >
                 ⧉ 拆分窗口
               </button>
@@ -908,15 +1109,15 @@ export function ImageWindow({ api, detached, onDetach, onAttach }: Props) {
                         <button
                           className="btn btn-small btn-outline"
                           onClick={() => recognizeThisCrop(active)}
-                          disabled={singleLoading || !activeTicket.crop}
+                          disabled={singleBusy || !activeTicket.crop}
                         >
-                          {singleLoading ? '识别中…' : '识别此张'}
+                          {singleBusy ? '识别中…' : '识别此张'}
                         </button>
                       ) : (
                         <button
                           className="btn btn-small btn-outline"
                           onClick={() => recognizeThisCrop(active)}
-                          disabled={singleLoading || !activeTicket.crop}
+                          disabled={singleBusy || !activeTicket.crop}
                           title="重新调用模型 API 识别本张小票"
                         >
                           重新识别
@@ -963,7 +1164,7 @@ export function ImageWindow({ api, detached, onDetach, onAttach }: Props) {
                     </div>
                   ) : (
                     <div className="single-empty">
-                      {singleLoading ? '识别中…' : '本张小票尚未识别，点击右上角「识别此张」进行 AI 识别。'}
+                      {singleBusy ? '识别中…' : '本张小票尚未识别，点击右上角「识别此张」进行 AI 识别。'}
                     </div>
                   )}
                 </div>
@@ -1075,6 +1276,15 @@ export function ImageWindow({ api, detached, onDetach, onAttach }: Props) {
                   >
                     {aiLoading ? '检测中…' : '检测小票（画框）'}
                   </button>
+                  {bgRunning && (
+                    <div className="bg-indicator" title="正在后台顺序识别各张小票，不阻塞前台；可取消">
+                      <span className="bg-spinner" />
+                      <span>后台识别中…</span>
+                      <button className="btn btn-small btn-link" onClick={cancelRecognition}>
+                        取消
+                      </button>
+                    </div>
+                  )}
                 </div>
                 {detectUnavailable && detectHint && (
                   <div className="detect-hint">
@@ -1100,9 +1310,9 @@ export function ImageWindow({ api, detached, onDetach, onAttach }: Props) {
                       {tickets.map((t, i) => (
                         <button
                           key={i}
-                          className={'ticket-thumb' + (viewMode === 'single' && active === i ? ' active' : '') + (t.rows.length ? '' : ' unrec')}
+                          className={'ticket-thumb' + (viewMode === 'single' && active === i ? ' active' : '') + (t.rows.length ? '' : ' unrec') + (recogState[i] === 'busy' ? ' busy' : '') + (recogState[i] === 'error' ? ' err' : '')}
                           onClick={() => openTicket(i)}
-                          title={`第 ${i + 1} 张${t.rows.length ? '' : '（未识别）'}`}
+                          title={`第 ${i + 1} 张${t.rows.length ? '（已识别）' : recogState[i] === 'busy' ? '（识别中…）' : '（未识别）'}`}
                         >
                           {t.crop ? (
                             <img src={`data:image/jpeg;base64,${t.crop}`} alt={`第 ${i + 1} 张`} draggable={false} />
@@ -1110,7 +1320,9 @@ export function ImageWindow({ api, detached, onDetach, onAttach }: Props) {
                             <span className="ticket-thumb-no">无图</span>
                           )}
                           <span className="ticket-thumb-idx">#{i + 1}</span>
-                          {t.rows.length === 0 && <span className="ticket-thumb-flag">待识别</span>}
+                          {recogState[i] === 'busy' && <span className="ticket-thumb-flag busy">识别中…</span>}
+                          {recogState[i] === 'error' && <span className="ticket-thumb-flag err">失败</span>}
+                          {recogState[i] !== 'busy' && recogState[i] !== 'error' && t.rows.length === 0 && <span className="ticket-thumb-flag">待识别</span>}
                         </button>
                       ))}
                     </div>
@@ -1268,4 +1480,4 @@ export function ImageWindow({ api, detached, onDetach, onAttach }: Props) {
       </div>
     </div>
   )
-}
+})
