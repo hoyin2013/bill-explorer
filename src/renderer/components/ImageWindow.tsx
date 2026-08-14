@@ -490,7 +490,7 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
           setSelected(imgs[0].path)
           await loadPreview(imgs[0].path)
         } else {
-          setStatus('该图片目录下没有图片')
+          setStatus(res.message || '该图片目录下没有图片')
         }
       }
     } catch (err) {

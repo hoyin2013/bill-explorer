@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build:renderer": "tsc && vite build",
-    "build:main": "esbuild src/main/main.ts --bundle --platform=node --external:electron --format=cjs --outfile=dist-electron/main.js",
+    "build:main": "esbuild src/main/main.ts --bundle --platform=node --external:electron --external:onnxruntime-node --external:jpeg-js --format=cjs --outfile=dist-electron/main.js",
     "build:preload": "esbuild src/main/preload.ts --bundle --platform=node --external:electron --format=cjs --outfile=dist-electron/preload.js",
     "build:electron": "npm run build:main && npm run build:preload",
     "build": "npm run build:renderer && npm run build:electron",

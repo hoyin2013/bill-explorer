@@ -1,33 +1,75 @@
 import { nativeImage } from 'electron'
-import { readdirSync, statSync } from 'fs'
-import { extname, join, basename } from 'path'
+import { readdirSync } from 'fs'
+import { extname, join, basename, isAbsolute } from 'path'
 
-const IMAGE_EXTS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.bmp', '.gif'])
+const IMAGE_EXTS = new Set([
+  '.jpg', '.jpeg', '.jpe', '.jfif',
+  '.png', '.webp', '.bmp', '.gif', '.tif', '.tiff',
+])
+
+// Windows 长路径（>260 字符）处理：给绝对路径加 \\?\ 前缀，规避长路径打开限制，
+// 并兼容部分仍强制 MAX_PATH 的 Windows 环境。\\?\ 前缀要求反斜杠，故先归一化。
+function toLongPath(p: string): string {
+  if (process.platform !== 'win32' || !p) return p
+  if (p.startsWith('\\\\?\\')) return p
+  if (!isAbsolute(p)) return p
+  return '\\\\?\\' + p.split('/').join('\\')
+}
+
+// 递归扫描时跳过这些目录名（系统/隐藏/缓存目录，避免误扫与卡顿）
+const SKIP_DIRS = new Set(['node_modules', '.git', '$RECYCLE.BIN', 'System Volume Information'])
 
 export interface ImageItem {
   name: string
   path: string
 }
 
+// 递归列出目录下所有图片（含子目录，最大深度 MAX_DEPTH），避免「图片在子文件夹里
+// 却提示没有」的常见误报。用 withFileTypes 直接靠 dirent 判文件/目录，少一次 stat 调用。
+const MAX_DEPTH = 5
+
 export function listImages(dir: string): { error?: boolean; message?: string; images?: ImageItem[] } {
   if (!dir) {
     return { error: true, message: '图片目录未设置。' }
   }
   try {
-    const entries = readdirSync(dir)
     const images: ImageItem[] = []
-    for (const name of entries) {
-      const lower = name.toLowerCase()
-      if (!IMAGE_EXTS.has(extname(lower))) continue
-      const full = join(dir, name)
+    let totalFiles = 0
+    const stack: Array<{ dir: string; depth: number }> = [{ dir, depth: 0 }]
+    while (stack.length) {
+      const { dir: cur, depth } = stack.pop()!
+      let entries
       try {
-        const st = statSync(full)
-        if (st.isFile()) images.push({ name, path: full })
+        entries = readdirSync(toLongPath(cur), { withFileTypes: true })
       } catch {
-        // skip unreadable
+        try {
+          entries = readdirSync(cur, { withFileTypes: true })
+        } catch {
+          continue // 该层无法读取则跳过（无权限等）
+        }
+      }
+      for (const d of entries) {
+        if (d.isDirectory()) {
+          if (depth < MAX_DEPTH && !SKIP_DIRS.has(d.name.toLowerCase())) {
+            stack.push({ dir: join(cur, d.name), depth: depth + 1 })
+          }
+          continue
+        }
+        if (!d.isFile()) continue
+        totalFiles++
+        const lower = d.name.toLowerCase()
+        if (!IMAGE_EXTS.has(extname(lower))) continue
+        images.push({ name: d.name, path: join(cur, d.name) })
       }
     }
     images.sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'))
+    if (images.length === 0 && totalFiles > 0) {
+      // 扫到了文件，但没有一个是支持的图片格式 —— 给一句可自查的提示
+      return {
+        images: [],
+        message: `已递归扫描子目录，共 ${totalFiles} 个文件，但没有被识别为图片（支持 .jpg/.jpeg/.png/.webp/.bmp/.gif/.tif 等常见格式）。`,
+      }
+    }
     return { images }
   } catch (err) {
     return { error: true, message: '读取图片目录失败：' + (err instanceof Error ? err.message : '未知错误') }
@@ -36,7 +78,9 @@ export function listImages(dir: string): { error?: boolean; message?: string; im
 
 export function readImageBase64(filePath: string, maxWidth = 1600): { error?: boolean; message?: string; base64?: string; mime?: string } {
   try {
-    const img = nativeImage.createFromPath(filePath)
+    // 先尝试长路径前缀；若 Electron 未识别该前缀导致读取失败，回退原始路径
+    let img = nativeImage.createFromPath(toLongPath(filePath))
+    if (img.isEmpty()) img = nativeImage.createFromPath(filePath)
     if (img.isEmpty()) {
       return { error: true, message: '无法读取该图片文件。' }
     }

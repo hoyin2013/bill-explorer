@@ -59,9 +59,9 @@ function getScriptPath(): string {
   return join(__dirname, '..', 'scripts', 'detect_tickets.py')
 }
 
-// ONNX 推理脚本路径：dist-electron/main.js -> 项目根/scripts/detect_onnx.mjs
+// ONNX 推理脚本路径：dist-electron/main.js -> 项目根/scripts/detect_onnx.cjs
 function getOnnxScriptPath(): string {
-  return join(__dirname, '..', 'scripts', 'detect_onnx.mjs')
+  return join(__dirname, '..', 'scripts', 'detect_onnx.cjs')
 }
 
 // 候选 Python 解释器（按优先级）。macOS / 多数 Linux 上命令是 python3，
@@ -144,28 +144,17 @@ export async function detectEnvironment(): Promise<{
     : modelPath.replace(/\.pt$/i, '.onnx')
   const modelExists = existsSync(onnxModel) || existsSync(modelPath)
 
-  // 运行时就绪：node 可用 且 onnxruntime-node 可加载
-  let nodeOk = false
+  // 运行时就绪：当前进程即 Electron 自带的 Node，无需系统安装 node。
+  // 直接在进程内解析 onnxruntime-node / jpeg-js（打包后它们位于 resources/app/node_modules）。
+  // 这样在没有安装 Node 的目标电脑上也能正确判定，不会误报「检测运行时缺失」。
+  let runtimeReady = false
   try {
-    const r = spawnSync('node', ['--version'], { timeout: 8000, windowsHide: true })
-    nodeOk = r.status === 0 && !r.error
+    require.resolve('onnxruntime-node')
+    require.resolve('jpeg-js')
+    runtimeReady = true
   } catch {
-    nodeOk = false
+    runtimeReady = false
   }
-  let ortOk = false
-  if (nodeOk) {
-    try {
-      const r = spawnSync('node', ['-e', "require.resolve('onnxruntime-node')"], {
-        timeout: 15000,
-        windowsHide: true,
-        cwd: join(__dirname, '..'),
-      })
-      ortOk = r.status === 0 && !r.error
-    } catch {
-      ortOk = false
-    }
-  }
-  const runtimeReady = nodeOk && ortOk
 
   let detail = ''
   if (!modelExists) {
@@ -237,63 +226,25 @@ function runPython(
   })
 }
 
-// 运行 ONNX 推理脚本（纯 Node，无需 Python）。返回与 runPython 相同结构。
-function runNodeScript(
+// 运行 ONNX 推理：直接在 Electron 主进程（自带 Node）内调用 detect_onnx.cjs 的 runDetect，
+// 不再 spawn 外部 `node` 进程 —— 这样在没有安装 Node 的目标电脑上也能正常推理。
+function runOnnxInProcess(
   scriptPath: string,
-  args: string[],
+  modelPath: string,
+  opts: { conf?: number; iou?: number; imgsz?: number; noCrops?: boolean; noRotate?: boolean },
   stdinText: string,
 ): Promise<{ stdout: string; stderr: string; code: number | null; error?: string }> {
   return new Promise((resolve) => {
-    let proc
-    try {
-      // 用 PATH 中的 node 运行（项目的 Node 与 onnxruntime-node 预编译 ABI 匹配）
-      proc = spawn('node', [scriptPath, ...args], { windowsHide: true, cwd: join(__dirname, '..') })
-    } catch (err) {
-      resolve({ stdout: '', stderr: '', code: null, error: err instanceof Error ? err.message : String(err) })
-      return
+    const run = async () => {
+      // 进程内 require 脚本（Electron 自带 Node 可直接加载 onnxruntime-node 原生绑定，N-API 跨版本兼容）
+      const mod = require(scriptPath)
+      const result = await mod.runDetect(stdinText, modelPath, opts)
+      return { stdout: JSON.stringify(result), stderr: '', code: 0 }
     }
-
-    let stdout = ''
-    let stderr = ''
-    let timedOut = false
-    const timer = setTimeout(() => {
-      timedOut = true
-      try {
-        proc.kill('SIGKILL')
-      } catch {
-        // ignore
-      }
-    }, DETECT_TIMEOUT_MS)
-
-    proc.stdout.on('data', (d) => {
-      stdout += d.toString()
-    })
-    proc.stderr.on('data', (d) => {
-      stderr += d.toString()
-    })
-    proc.on('error', (err) => {
-      clearTimeout(timer)
-      resolve({ stdout, stderr, code: null, error: err.message })
-    })
-    proc.on('close', (code) => {
-      clearTimeout(timer)
-      if (timedOut) {
-        resolve({ stdout, stderr, code, error: `检测超时（>${DETECT_TIMEOUT_MS / 1000}s），请检查模型加载是否过慢` })
-      } else {
-        resolve({ stdout, stderr, code, error: undefined })
-      }
-    })
-
-    try {
-      proc.stdin.write(stdinText)
-      proc.stdin.end()
-    } catch {
-      try {
-        proc.kill()
-      } catch {
-        // ignore
-      }
-    }
+    run().then(
+      (r) => resolve(r),
+      (err) => resolve({ stdout: '', stderr: '', code: null, error: err instanceof Error ? err.message : String(err) }),
+    )
   })
 }
 
@@ -362,9 +313,12 @@ export async function detectTickets(opts: DetectOptions): Promise<DetectResult> 
     if (!existsSync(scriptPath)) {
       return { ...empty, message: 'ONNX 推理脚本缺失：' + scriptPath }
     }
-    const args = [onnxModel, '--conf', String(opts.conf ?? 0.25)]
-    if (!opts.crops) args.push('--no-crops')
-    const run = await runNodeScript(scriptPath, args, img.base64)
+    const run = await runOnnxInProcess(
+      scriptPath,
+      onnxModel,
+      { conf: opts.conf ?? 0.25, iou: 0.45, imgsz: 640, noCrops: !opts.crops, noRotate: false },
+      img.base64,
+    )
     return finish(run, 'ONNX')
   }
 
@@ -411,9 +365,12 @@ export async function detectFromFile(
 
   if (existsSync(onnxModel)) {
     const scriptPath = getOnnxScriptPath()
-    const args = [onnxModel]
-    if (!opts?.crops) args.push('--no-crops')
-    const run = await runNodeScript(scriptPath, args, b64)
+    const run = await runOnnxInProcess(
+      scriptPath,
+      onnxModel,
+      { conf: 0.25, iou: 0.45, imgsz: 640, noCrops: !opts?.crops, noRotate: false },
+      b64,
+    )
     if (run.error || !run.stdout.trim()) {
       return { ok: false, boxes: [], crops: [], imageWidth: 0, imageHeight: 0, modelAvailable: false, message: run.error || run.stderr || 'no output' }
     }
