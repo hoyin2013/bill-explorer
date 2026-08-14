@@ -54,6 +54,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   listImages: (dir?: string) => ipcRenderer.invoke('list-images', dir),
   // 读取图片为 base64
   readImageBase64: (imagePath: string) => ipcRenderer.invoke('read-image-base64', imagePath),
+  // 读取全局默认图片旋转角（度）
+  getImageRotation: () => ipcRenderer.invoke('get-image-rotation'),
+  // 保存全局默认图片旋转角（自动保存方向）
+  setImageRotation: (angle: number) => ipcRenderer.invoke('set-image-rotation', angle),
   // 获取当前账单目录的人名清单（文件名提取）
   getNameList: () => ipcRenderer.invoke('get-name-list'),
   // AI 识别小票

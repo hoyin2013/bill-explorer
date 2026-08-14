@@ -87,9 +87,9 @@ function rowsToTsv(rs: AIRecognizedRow[]): string {
   return lines.join('\n')
 }
 
-// 结果表列定义（已去掉调货人 / 备注：识别不准且无需记录）
+// 结果表列定义（已去掉调货人 / 备注：识别不准且无需记录；也不显示「序号」列，
+// 序号是自动编号、对录入无意义，打开识别结果时不再占用空间）
 const RESULT_COLS: Array<{ field: keyof AIRecognizedRow; label: string; w: string }> = [
-  { field: 'no', label: '序号', w: '42px' },
   { field: 'date', label: '日期', w: '92px' },
   { field: 'name', label: '货品', w: 'auto' },
   { field: 'unit', label: '单位', w: '54px' },
@@ -178,6 +178,11 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
   // 之后跨图片保留（不在 loadPreview / detectOnly 重置），后续识别默认套用该日期，
   // 避免每次靠 OCR 识别日期带来的误差。
   const dateAnchorRef = useRef<string | null>(null)
+  // 全局默认旋转角（度，0/90/180/270）：用户旋转任一图片后自动保存（持久化到 electron-store），
+  // 之后每张图片打开 / 检测都套用此方向，避免反复手动旋转。用 ref 供异步加载读取最新值。
+  const defaultRotateRef = useRef(0)
+  // rotate 的最新值镜像，供 rotateBy 计算下一角度时避免闭包读到旧值
+  const rotateRef = useRef(0)
 
   // 抓取当前整块状态（用于拆分窗口时把已识别结果与进度带过去）
   function captureState(): ImageSnapshot {
@@ -328,6 +333,10 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
   useEffect(() => {
     lbPanRef.current = lbPan
   }, [lbPan])
+  // 同步 rotate 最新值到 ref（供 rotateBy 计算下一角度）
+  useEffect(() => {
+    rotateRef.current = rotate
+  }, [rotate])
   // 放大查看（lightbox）每次打开都复位缩放/平移，从原始大小开始
   useEffect(() => {
     if (lightbox) {
@@ -502,7 +511,10 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
 
   async function loadPreview(path: string) {
     setSelected(path)
-    setRotate(0)
+    // 套用全局默认方向：上次旋转保存的角度，使每张图片打开即按统一方向展示
+    const def = defaultRotateRef.current
+    setRotate(def)
+    rotateRef.current = def
     setRows([])
     setTickets([])
     setBoxes([])
@@ -539,6 +551,23 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
     panRef.current = { x: 0, y: 0 }
     setZoom(1)
     setPan({ x: 0, y: 0 })
+  }
+
+  // 旋转并自动保存为全局默认方向：之后每张图片打开 / 检测都套用此方向，
+  // 避免反复手动旋转。delta 为 +90（右转）/ -90（左转）。
+  function rotateBy(delta: number) {
+    const next = (((rotateRef.current + delta) % 360) + 360) % 360
+    setRotate(next)
+    rotateRef.current = next
+    defaultRotateRef.current = next
+    api.setImageRotation(next).catch(() => {})
+  }
+
+  // 复位到全局默认方向（而非强制 0），保证与你设定的标准方向一致；同时复位缩放/平移
+  function resetRotation() {
+    setRotate(defaultRotateRef.current)
+    rotateRef.current = defaultRotateRef.current
+    resetView()
   }
 
   // 缩放范围限制
@@ -911,23 +940,49 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
     )
   }
 
-  // 初始化：读取设置中的图片目录
+  // 初始化：先取回持久化的全局默认旋转角，再读取设置中的图片目录
   useEffect(() => {
     // 独立窗口（带 initialState）的状态已由 useLayoutEffect 的 restoreState 恢复，
     // 不能再自动 loadImages，否则会把 selected 重置到第一张、并清空已识别的 tickets/rows
     if (initialState) return
+    let cancelled = false
+    // 先取回全局默认旋转角，确保首张图片按上次设定的方向加载（避免「先空白再旋转」）
     api
-      .getSettings()
-      .then((s) => {
-        if (s.imageDir) {
-          loadImages(s.imageDir)
-        } else {
-          setStatus('请先选择小票图片目录')
-        }
+      .getImageRotation()
+      .then((a) => {
+        defaultRotateRef.current = ((Number(a) || 0) % 360 + 360) % 360
       })
-      .catch(() => setStatus('读取设置失败'))
+      .catch(() => {})
+      .finally(() => {
+        if (cancelled) return
+        api
+          .getSettings()
+          .then((s) => {
+            if (s.imageDir) {
+              loadImages(s.imageDir)
+            } else {
+              setStatus('请先选择小票图片目录')
+            }
+          })
+          .catch(() => setStatus('读取设置失败'))
+      })
+    return () => {
+      cancelled = true
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
+
+  // 独立窗口（带 initialState）启动时也取回全局默认旋转角，供后续切换图片套用
+  useEffect(() => {
+    if (!initialState) return
+    api
+      .getImageRotation()
+      .then((a) => {
+        defaultRotateRef.current = ((Number(a) || 0) % 360 + 360) % 360
+      })
+      .catch(() => {})
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialState])
 
   // 挂载时探测检测增强环境，提前告知用户是否可用（而非点「检测」后才报错）
   useEffect(() => {
@@ -1025,13 +1080,13 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
             </>
           ) : (
             <>
-              <button className="btn btn-small btn-outline" onClick={() => setRotate((r) => (r + 270) % 360)} disabled={!preview} title="向左旋转 90°">
+              <button className="btn btn-small btn-outline" onClick={() => rotateBy(-90)} disabled={!preview} title="向左旋转 90°（自动保存为默认方向）">
                 ↺ 左转
               </button>
-              <button className="btn btn-small btn-outline" onClick={() => setRotate((r) => (r + 90) % 360)} disabled={!preview} title="向右旋转 90°">
+              <button className="btn btn-small btn-outline" onClick={() => rotateBy(90)} disabled={!preview} title="向右旋转 90°（自动保存为默认方向）">
                 ↻ 右转
               </button>
-              <button className="btn btn-small btn-link" onClick={() => { setRotate(0); resetView() }} disabled={!preview} title="复位旋转与缩放/位置">
+              <button className="btn btn-small btn-link" onClick={resetRotation} disabled={!preview} title="复位到默认方向（缩放/位置也复位）">
                 复位
               </button>
               <button className="btn btn-small btn-outline" onClick={() => zoomBy(1 / 1.2)} disabled={!preview} title="缩小">－</button>

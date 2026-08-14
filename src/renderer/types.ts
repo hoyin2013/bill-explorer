@@ -197,6 +197,10 @@ export interface ElectronAPI {
     base64?: string
     mime?: string
   }>
+  // 读取全局默认图片旋转角（度，0/90/180/270）：旋转任一图片后自动保存，其后每张图套用此方向
+  getImageRotation: () => Promise<number>
+  // 保存全局默认图片旋转角（自动保存用户设定的方向）
+  setImageRotation: (angle: number) => Promise<void>
   // 获取当前账单目录的人名清单（从文件名提取）
   getNameList: () => Promise<{ names: string[] }>
   // AI 识别小票

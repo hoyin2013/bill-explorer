@@ -34,10 +34,14 @@ const store = new Store<{
   history?: HistoryRecord[]
   settings?: AppSettings
   applied?: Record<string, string[]>
+  // 全局默认图片旋转角（度，0/90/180/270）：用户在识图面板旋转任一图片后自动保存，
+  // 之后每张图片打开 / 检测都套用此方向，避免反复手动旋转
+  imageRotation?: number
 }>({
   schema: {
     workDir: { type: 'string', default: '' },
     history: { type: 'array', default: [] },
+    imageRotation: { type: 'number', default: 0 },
     settings: {
       type: 'object',
       default: {},
@@ -463,6 +467,19 @@ ipcMain.handle('list-images', (_event, dir?: string) => {
 // ============ IPC 通道：读取图片为 base64（并压缩，用于预览和 AI） ============
 ipcMain.handle('read-image-base64', (_event, imagePath: string) => {
   return readImageBase64(imagePath)
+})
+
+// ============ IPC 通道：读取全局默认图片旋转角（度，0/90/180/270） ============
+// 用户在识图面板旋转任一图片后写入，之后每张图片打开都套用此方向
+ipcMain.handle('get-image-rotation', () => {
+  const v = store.get('imageRotation')
+  return typeof v === 'number' ? ((v % 360) + 360) % 360 : 0
+})
+
+// ============ IPC 通道：保存全局默认图片旋转角（自动保存用户最后一次设定的方向） ============
+ipcMain.handle('set-image-rotation', (_event, angle: number) => {
+  const a = (((Math.round(Number(angle) || 0) % 360) + 360) % 360)
+  store.set('imageRotation', a)
 })
 
 // ============ IPC 通道：AI 识别小票 ============
