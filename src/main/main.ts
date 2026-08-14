@@ -470,7 +470,7 @@ ipcMain.handle('ai-recognize', async (_event, imagePath: string) => {
   const settings = getSettings()
   // 遍历账单目录，取每个 Excel 的完整文件名作为清单（~ 开头的临时文件已由 scanDirectory 过滤）
   const nameList = await buildNameList(store.get('workDir') || '')
-  const base = readImageBase64(imagePath)
+  const base = await readImageBase64(imagePath)
   if (base.error) return base
   // 把文件名清单附加到提示词之后，让 AI 在已知范围内识别并做模糊匹配
   const prompt = buildAugmentedPrompt(settings.prompt, nameList)

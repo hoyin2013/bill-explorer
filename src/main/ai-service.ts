@@ -599,7 +599,7 @@ export async function recognizeTicketsWithDetection(
   if (!det.modelAvailable) {
     const base = opts?.imageBase64
       ? { error: false, base64: opts.imageBase64, message: '' }
-      : readImageBase64(imagePath)
+      : await readImageBase64(imagePath)
     if (base.error || !base.base64) {
       return { error: true, message: base.message || '读取图片失败', detected: false, modelAvailable: false }
     }

@@ -1,11 +1,17 @@
 import { nativeImage } from 'electron'
-import { readdirSync } from 'fs'
+import { readdirSync, readFileSync } from 'fs'
 import { extname, join, basename, isAbsolute } from 'path'
+import convert from 'heic-convert'
 
 const IMAGE_EXTS = new Set([
   '.jpg', '.jpeg', '.jpe', '.jfif',
   '.png', '.webp', '.bmp', '.gif', '.tif', '.tiff',
+  // HEIC/HEIF：iPhone 等拍摄的默认格式，跨平台统一用 libheif 转码（见 readImageBase64）
+  '.heic', '.heif',
 ])
+
+// HEIC/HEIF：Electron 的 nativeImage 在 Windows/Linux 上无法解码，需走 libheif 转码分支
+const HEIC_EXTS = new Set(['.heic', '.heif'])
 
 // Windows 长路径（>260 字符）处理：给绝对路径加 \\?\ 前缀，规避长路径打开限制，
 // 并兼容部分仍强制 MAX_PATH 的 Windows 环境。\\?\ 前缀要求反斜杠，故先归一化。
@@ -67,7 +73,7 @@ export function listImages(dir: string): { error?: boolean; message?: string; im
       // 扫到了文件，但没有一个是支持的图片格式 —— 给一句可自查的提示
       return {
         images: [],
-        message: `已递归扫描子目录，共 ${totalFiles} 个文件，但没有被识别为图片（支持 .jpg/.jpeg/.png/.webp/.bmp/.gif/.tif 等常见格式）。`,
+        message: `已递归扫描子目录，共 ${totalFiles} 个文件，但没有被识别为图片（支持 .jpg/.jpeg/.png/.webp/.bmp/.gif/.tif/.heic 等常见格式）。`,
       }
     }
     return { images }
@@ -76,9 +82,15 @@ export function listImages(dir: string): { error?: boolean; message?: string; im
   }
 }
 
-export function readImageBase64(filePath: string, maxWidth = 1600): { error?: boolean; message?: string; base64?: string; mime?: string } {
+export async function readImageBase64(filePath: string, maxWidth = 1600): Promise<{ error?: boolean; message?: string; base64?: string; mime?: string }> {
   try {
-    // 先尝试长路径前缀；若 Electron 未识别该前缀导致读取失败，回退原始路径
+    // HEIC/HEIF：nativeImage 在 Windows/Linux 上解不了，统一用 libheif 转成 JPEG 再走公共缩放/编码逻辑
+    if (HEIC_EXTS.has(extname(filePath.toLowerCase()))) {
+      const raw = readFileSync(toLongPath(filePath) || filePath)
+      const jpegBuf = await convert({ buffer: raw, format: 'JPEG', quality: 0.92 })
+      return encodeJpeg(jpegBuf, maxWidth)
+    }
+    // 其余格式走原生解码：先尝试长路径前缀；若 Electron 未识别该前缀导致读取失败，回退原始路径
     let img = nativeImage.createFromPath(toLongPath(filePath))
     if (img.isEmpty()) img = nativeImage.createFromPath(filePath)
     if (img.isEmpty()) {
@@ -91,6 +103,14 @@ export function readImageBase64(filePath: string, maxWidth = 1600): { error?: bo
   } catch (err) {
     return { error: true, message: '读取图片失败：' + (err instanceof Error ? err.message : '未知错误') }
   }
+}
+
+// 把 JPEG/PNG 等已解码 buffer 按最长边缩放到 maxWidth 以内并重编码为 JPEG（降低 token 与推理耗时）
+function encodeJpeg(buf: Buffer, maxWidth: number): { base64: string; mime: string } {
+  const img = nativeImage.createFromBuffer(buf)
+  const size = img.getSize()
+  const resized = size.width > maxWidth ? img.resize({ width: maxWidth }) : img
+  return { base64: resized.toJPEG(85).toString('base64'), mime: 'image/jpeg' }
 }
 
 // 把 base64 图片按最长边缩放到 maxDim 以内（JPEG），用于降低视觉模型的 token 消耗与推理耗时。

@@ -261,7 +261,7 @@ export async function detectTickets(opts: DetectOptions): Promise<DetectResult> 
   // 1. 读取图片 base64：优先使用前端传来的（已旋转/缩放后的）base64，否则读原图缩放
   const img = opts.imageBase64 && opts.imageBase64.trim()
     ? { error: false, base64: opts.imageBase64.trim(), mime: 'image/jpeg' }
-    : readImageBase64(opts.imagePath || '')
+    : await readImageBase64(opts.imagePath || '')
   if (img.error || !img.base64) {
     return { ...empty, message: img.message || '读取图片失败' }
   }
