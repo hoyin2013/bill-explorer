@@ -39,3 +39,7 @@ Thumbs.db
 # Temporary test/diagnostic files
 _*.js
 _*.sh
+
+# Local debug/test executables (exceed GitHub's 100MB limit; the app is built via CI)
+*.exe
+_rctest_result.txt

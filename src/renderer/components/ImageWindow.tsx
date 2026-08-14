@@ -165,7 +165,9 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
   const lbDragRef = useRef<{ startX: number; startY: number; panX: number; panY: number } | null>(null)
   const lbWrapRef = useRef<HTMLDivElement>(null)
   // 图片列表（左）与预览区（右）的可调分隔宽度（px）；面板整体偏窄，默认收窄
-  const [listWidth, setListWidth] = useState(124)
+  const [listWidth, setListWidth] = useState(104)
+  // 左侧图片列表是否折叠：折叠后识别信息区占满整个窗口宽度，便于查看/录入
+  const [listCollapsed, setListCollapsed] = useState(false)
   // 复位旋转瞬间禁用过渡，避免「从旋转角回正」触发可见的旋转动画
   const [instant, setInstant] = useState(false)
   const wrapRef = useRef<HTMLDivElement>(null)
@@ -198,6 +200,7 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
       singleZoom,
       singlePan,
       listWidth,
+      listCollapsed,
       dateAnchor: dateAnchorRef.current,
     }
   }
@@ -222,6 +225,7 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
     setSingleZoom(s.singleZoom ?? 1)
     setSinglePan(s.singlePan ?? { x: 0, y: 0 })
     setListWidth(s.listWidth ?? 124)
+    setListCollapsed(s.listCollapsed ?? false)
     dateAnchorRef.current = s.dateAnchor ?? null
     // 复位后台识别队列与瞬时过渡，避免残留动画 / 重复识别
     recogMgr.current.cancelled = true
@@ -632,7 +636,7 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
     const startX = e.clientX
     const startW = listWidth
     const onMove = (ev: MouseEvent) => {
-      const nw = Math.min(220, Math.max(96, startW + (ev.clientX - startX)))
+      const nw = Math.min(200, Math.max(70, startW + (ev.clientX - startX)))
       setListWidth(nw)
     }
     const onUp = () => {
@@ -949,23 +953,39 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
         <div className="image-panel-header">
           <div className="image-panel-head-row">
             <span className="image-panel-title">小票识图</span>
-            {detached ? (
+            <button
+              className="btn btn-small btn-outline"
+              onClick={chooseDir}
+              title="选择小票图片所在目录"
+            >
+              选择目录
+            </button>
+            <div className="head-actions">
               <button
                 className="btn btn-small btn-outline"
-                onClick={() => onAttach?.(captureState())}
-                title="把本窗口合并回主窗口右侧面板（保留此处的结果与进度）"
+                onClick={() => setListCollapsed((c) => !c)}
+                title="折叠/展开左侧图片列表：折叠后识别信息占满整个窗口宽度，便于查看与录入"
               >
-                ⎘ 合并回主窗口
+                {listCollapsed ? '☰ 显示列表' : '☰ 隐藏列表'}
               </button>
-            ) : (
-              <button
-                className="btn btn-small btn-outline"
-                onClick={() => onDetach?.(captureState())}
-                title="把本面板拆成独立窗口，方便在大屏上单独查看 / 对照录入（保留当前结果与进度）"
-              >
-                ⧉ 拆分窗口
-              </button>
-            )}
+              {detached ? (
+                <button
+                  className="btn btn-small btn-outline"
+                  onClick={() => onAttach?.(captureState())}
+                  title="把本窗口合并回主窗口右侧面板（保留此处的结果与进度）"
+                >
+                  ⎘ 合并回主窗口
+                </button>
+              ) : (
+                <button
+                  className="btn btn-small btn-outline"
+                  onClick={() => onDetach?.(captureState())}
+                  title="把本面板拆成独立窗口，方便在大屏上单独查看 / 对照录入（保留当前结果与进度）"
+                >
+                  ⧉ 拆分窗口
+                </button>
+              )}
+            </div>
           </div>
           {imageDir && (
             <span className="image-panel-dir" title={imageDir}>
@@ -973,10 +993,6 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
             </span>
           )}
         </div>
-
-        <button className="btn btn-small btn-outline" onClick={chooseDir} style={{ alignSelf: 'flex-start' }}>
-          选择图片目录
-        </button>
 
         {/* 顶部工具栏：旋转 / 缩放 / 当前图 / 单张导航 —— 统一上移到面板最顶部 */}
         <div className="image-topbar">
@@ -1032,35 +1048,39 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
         </div>
 
         <div className="image-content">
-          {/* 左侧：可见的图片列表 */}
-          <div className="image-list-side" style={{ width: listWidth, flex: '0 0 auto' }}>
-            <div className="image-list-title">图片列表（{images.length}）</div>
-            <div className="image-list">
-              {loading && <div className="image-list-empty">读取中…</div>}
-              {!loading && images.length === 0 && (
-                <div className="image-list-empty">
-                  {imageDir ? '该目录下没有图片' : '请先选择图片目录'}
+          {/* 左侧：可见的图片列表（可折叠，折叠后识别信息占满窗口宽度） */}
+          {!listCollapsed && (
+            <>
+              <div className="image-list-side" style={{ width: listWidth, flex: '0 1 auto' }}>
+                <div className="image-list-title">图片列表（{images.length}）</div>
+                <div className="image-list">
+                  {loading && <div className="image-list-empty">读取中…</div>}
+                  {!loading && images.length === 0 && (
+                    <div className="image-list-empty">
+                      {imageDir ? '该目录下没有图片' : '请先选择图片目录'}
+                    </div>
+                  )}
+                  {images.map((img) => (
+                    <button
+                      key={img.path}
+                      className={'image-list-item' + (selected === img.path ? ' selected' : '')}
+                      onClick={() => loadPreview(img.path)}
+                      title={img.name}
+                    >
+                      {img.name}
+                    </button>
+                  ))}
                 </div>
-              )}
-              {images.map((img) => (
-                <button
-                  key={img.path}
-                  className={'image-list-item' + (selected === img.path ? ' selected' : '')}
-                  onClick={() => loadPreview(img.path)}
-                  title={img.name}
-                >
-                  {img.name}
-                </button>
-              ))}
-            </div>
-          </div>
+              </div>
 
-          {/* 右侧：预览 + 操作 + 识别结果 */}
-          <div
-            className="image-splitter"
-            onMouseDown={onSplitterDown}
-            title="拖动调整左侧列表与右侧预览的宽度"
-          />
+              {/* 右侧：预览 + 操作 + 识别结果 */}
+              <div
+                className="image-splitter"
+                onMouseDown={onSplitterDown}
+                title="拖动调整左侧列表与右侧预览的宽度"
+              />
+            </>
+          )}
           <div className="image-main-area">
             {viewMode === 'single' && activeTicket ? (
               /* ====== 单张小票放大视图 ====== */

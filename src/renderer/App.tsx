@@ -379,10 +379,11 @@ function AppInner({ api }: { api: ElectronAPI }) {
 
   // ---- 保存：把面板内的多行数据一次性写回 Excel ----
   // 若与上次保存的是同一个文件（未切换其他 Excel），则覆盖更新上次写入的行，否则追加新记录
-  async function onSaveMemo(rows: Array<{
+  // 返回是否保存成功（供「保存并下一条」复用，避免在推进逻辑里重复这段）
+  async function doSaveMemo(rows: Array<{
     no: string; date: string; name: string; unit: string; qty: number; price: number; amount: number | ''; person: string; remark: string
-  }>) {
-    if (!activeFile) return
+  }>): Promise<boolean> {
+    if (!activeFile) return false
     setMemoSaving(true)
     setMemoStatus('')
     const isUpdate = lastSavedFile.current === activeFile.filePath
@@ -392,24 +393,35 @@ function AppInner({ api }: { api: ElectronAPI }) {
         : await api.appendMemo(activeFile.filePath, rows)
       if (result.error) {
         setMemoStatus('保存失败：' + (result.message || '未知错误'))
+        return false
       } else {
         lastSavedFile.current = activeFile.filePath
         setMemoStatus(result.message || '已保存')
         refreshHistory()
+        return true
       }
     } catch (err) {
       setMemoStatus('保存失败：' + (err instanceof Error ? err.message : '未知错误'))
+      return false
     } finally {
       setMemoSaving(false)
     }
+  }
+
+  // 普通保存：成功后清空左侧搜索框（回到全部文件视图，方便继续找下一张）
+  async function onSaveMemo(rows: Array<{
+    no: string; date: string; name: string; unit: string; qty: number; price: number; amount: number | ''; person: string; remark: string
+  }>) {
+    const ok = await doSaveMemo(rows)
+    if (ok) setQuery('')
   }
 
   // ---- 保存并前进到下一条 ----
   async function onSaveAndNext(rows: Array<{
     no: string; date: string; name: string; unit: string; qty: number; price: number; amount: number | ''; person: string; remark: string
   }>) {
-    await onSaveMemo(rows)
-    if (!activeFile) return
+    const ok = await doSaveMemo(rows)
+    if (!ok || !activeFile) return
     const nextIdx = filtered.findIndex((f) => f.filePath === activeFile.filePath) + 1
     if (nextIdx < filtered.length) {
       setActiveFile(filtered[nextIdx])
@@ -491,7 +503,10 @@ function AppInner({ api }: { api: ElectronAPI }) {
               file={activeFile}
               api={api}
               onClose={onCloseMemo}
-              onSaved={refreshHistory}
+              onSaved={() => {
+                setQuery('')      // 保存后清空左侧搜索框，回到全部文件视图
+                refreshHistory()
+              }}
             />
           ) : (
             <div className="idle-hint">

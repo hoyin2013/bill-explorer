@@ -90,6 +90,7 @@ export interface ImageSnapshot {
   singleZoom: number
   singlePan: { x: number; y: number }
   listWidth: number
+  listCollapsed: boolean
   dateAnchor: string | null
 }
 

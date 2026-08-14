@@ -41,6 +41,7 @@
   "build": {
     "appId": "com.bill-explorer.app",
     "productName": "账单录入器",
+    "copyright": "Copyright (C) 2026 账单录入器",
     "directories": {
       "output": "release"
     },
@@ -55,7 +56,8 @@
       "target": [
         "nsis",
         "portable"
-      ]
+      ],
+      "signAndEditExecutable": false
     },
     "mac": {
       "target": "dmg"
