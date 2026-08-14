@@ -114,6 +114,8 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
   // 序号列拖拽填充（Excel 式填充柄）：startR=种子行，endR=拖动到的行，拖动时高亮该区间
   const [fill, setFill] = useState<{ startR: number; endR: number } | null>(null)
   const fillDragRef = useRef<{ startR: number; seed: number; valid: boolean; endR: number } | null>(null)
+  // 矩形框选（鼠标拖拽选 N×M 单元格）：r1/c1=锚点，r2/c2=当前拉伸到的格
+  const [selRange, setSelRange] = useState<{ r1: number; c1: number; r2: number; c2: number } | null>(null)
 
   // 接收独立"小票识图"窗口发来的回填请求（用户主动点击"填入当前录入"才触发，不影响录入）
   const applyRowsRef = useRef(applyRecognizedRows)
@@ -161,6 +163,13 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
   const activeTdRef = useRef<HTMLTableCellElement | null>(null)
   const selRowsRef = useRef(selRows)
   selRowsRef.current = selRows
+  // 矩形框选（供事件回调读最新值）
+  const selRangeRef = useRef(selRange)
+  selRangeRef.current = selRange
+  // 框选拖拽过程的状态
+  const rangeDragRef = useRef<{ r1: number; c1: number; x: number; y: number; moved: boolean } | null>(null)
+  // 框选拖拽结束的尾随 click 不处理（否则会把刚框好的选区又清掉）
+  const suppressClickRef = useRef(false)
   // 撤销 / 重做栈：存整表快照（string[][]），账本行数量级下开销可忽略
   const undoRef = useRef<string[][][]>([])
   const redoRef = useRef<string[][][]>([])
@@ -196,6 +205,7 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
     setEditing(false)
     setDirty(true)
     setSelRows(new Set())
+    setSelRange(null)
     setAutoRows(new Set())
     lastCommitKeyRef.current = null
     setActive((a) => ({ r: Math.min(a.r, Math.max(0, snap.length - 1)), c: a.c }))
@@ -215,6 +225,7 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
     setEditing(false)
     setDirty(true)
     setAutoRows(new Set())
+    setSelRange(null)
     lastCommitKeyRef.current = null
     setActive((a) => ({ r: Math.min(a.r, Math.max(0, snap.length - 1)), c: a.c }))
     syncHist()
@@ -242,6 +253,7 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
     lastCommitKeyRef.current = null
     setHistLen({ undo: 0, redo: 0 })
     setSelRows(new Set())
+    setSelRange(null)
     setMenu(null)
     ;(async () => {
       const res = await api.loadSheet(file.filePath)
@@ -393,11 +405,66 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
 
   // 单击单元格：选中并激活该格（复制请用 Ctrl+C / 右键菜单 / Ctrl+X 剪切）
   const handleCellClick = useCallback((r: number, c: number) => {
+    // 框选拖拽结束的尾随 click 不处理，否则会把刚框好的选区又清掉
+    if (suppressClickRef.current) return
     // 点普通单元格即取消整行选择（Excel 习惯），避免 Delete 误清掉之前选的行
     if (selRowsRef.current.size > 0) setSelRows(new Set())
     if (isRowEmpty(gridRef.current[r])) setInputRow(r)
     selectCell(r, c)
   }, [selectCell])
+
+  // 矩形框选：在单元格上按下左键并拖动，框选 N×M 区域（Excel 习惯）。
+  // 仅左键、非编辑态触发；移动超过阈值(4px)才算拖拽，否则视作普通单击（交给 onClick）。
+  // 与序号列填充柄、行号整行选择互不影响：填充柄 onMouseDown 已 stopPropagation，行号是独立元素。
+  const onCellMouseDown = useCallback((e: React.MouseEvent, r: number, c: number) => {
+    if (editingRef.current || e.button !== 0) return
+    e.stopPropagation()
+    if (selRowsRef.current.size > 0) setSelRows(new Set())
+    rangeDragRef.current = { r1: r, c1: c, x: e.clientX, y: e.clientY, moved: false }
+
+    const onMove = (me: MouseEvent) => {
+      const d = rangeDragRef.current
+      if (!d) return
+      if (!d.moved && Math.hypot(me.clientX - d.x, me.clientY - d.y) < 4) return
+      d.moved = true
+      // 用命中测试找光标所在的单元格（data-r/data-c 标在 <td> 上，含填充柄区域）
+      const el = document.elementFromPoint(me.clientX, me.clientY) as HTMLElement | null
+      const cell = el?.closest('[data-r]') as HTMLElement | null
+      let rr = d.r1
+      let cc = d.c1
+      if (cell && cell.dataset.c !== undefined) {
+        const dr = Number(cell.dataset.r)
+        const dc = Number(cell.dataset.c)
+        if (!Number.isNaN(dr) && !Number.isNaN(dc)) {
+          rr = dr
+          cc = dc
+        }
+      }
+      setSelRange({ r1: d.r1, c1: d.c1, r2: rr, c2: cc })
+      setActive({ r: rr, c: cc })
+    }
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+      const d = rangeDragRef.current
+      rangeDragRef.current = null
+      if (!d || !d.moved) {
+        // 没移动 → 普通单击，清除框选（单选交给 onClick 处理）
+        setSelRange(null)
+      } else {
+        // 拖拽结束：把锚点设到选区左上角，便于后续粘贴/编号从起点开始；并吞掉尾随 click
+        const f = selRangeRef.current
+        if (f) setActive({ r: Math.min(f.r1, f.r2), c: Math.min(f.c1, f.c2) })
+        suppressClickRef.current = true
+        window.setTimeout(() => {
+          suppressClickRef.current = false
+        }, 0)
+      }
+      focusContainer()
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+  }, [focusContainer])
 
   // 序号列填充柄：按住右下角小方块向下拖动，按 Excel 习惯生成 1,2,3… 递增序列。
   // 种子为该序号格当前数值；拖动区间 [min,max] 内除种子外 = seed ± offset。
@@ -597,6 +664,7 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
   // 非编辑态导航
   const nav = useCallback((dr: number, dc: number) => {
     if (selRowsRef.current.size > 0) setSelRows(new Set()) // 方向键移动即取消整行选择
+    if (selRangeRef.current) setSelRange(null) // 方向键也取消矩形框选
     const { r, c } = activeRef.current
     let nr = r + dr
     let nc = c + dc
@@ -612,6 +680,67 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
   }, [appendRowsIfNeeded, maybeSeed])
 
   /* ===================== 复制 / 粘贴 ===================== */
+  // 把当前"选择"转成 TSV 文本 + 尺寸：优先矩形框选 > 整行选择 > 单格。
+  // 供复制/剪切使用（剪切后再清空对应区域）。
+  const selBlockTSV = useCallback((): { tsv: string; rows: number; cols: number } => {
+    const range = selRangeRef.current
+    if (range) {
+      const rmin = Math.min(range.r1, range.r2)
+      const rmax = Math.max(range.r1, range.r2)
+      const cmin = Math.min(range.c1, range.c2)
+      const cmax = Math.max(range.c1, range.c2)
+      const lines: string[] = []
+      for (let r = rmin; r <= rmax; r += 1) {
+        const row = gridRef.current[r] || emptyRow()
+        const cells: string[] = []
+        for (let c = cmin; c <= cmax; c += 1) cells.push(row[c] || '')
+        lines.push(cells.join('\t'))
+      }
+      return { tsv: lines.join('\n'), rows: rmax - rmin + 1, cols: cmax - cmin + 1 }
+    }
+    const selr = selRowsRef.current
+    if (selr.size > 0) {
+      const idx = Array.from(selr).sort((a, b) => a - b)
+      const tsv = idx.map((i) => (gridRef.current[i] || emptyRow()).join('\t')).join('\n')
+      return { tsv, rows: idx.length, cols: COL_COUNT }
+    }
+    const { r, c } = activeRef.current
+    return { tsv: gridRef.current[r]?.[c] || '', rows: 1, cols: 1 }
+  }, [])
+
+  // 清空当前"选择"的内容（不删行、不破坏结构，与 Excel Delete 语义一致）：
+  // 优先矩形框选 > 整行选择 > 单格。
+  const clearSelectionBlock = useCallback(() => {
+    const range = selRangeRef.current
+    if (range) {
+      const rmin = Math.min(range.r1, range.r2)
+      const rmax = Math.max(range.r1, range.r2)
+      const cmin = Math.min(range.c1, range.c2)
+      const cmax = Math.max(range.c1, range.c2)
+      pushUndo()
+      lastCommitKeyRef.current = null
+      setGrid((prev) => {
+        const next = prev.map((row) => row.slice())
+        for (let r = rmin; r <= rmax; r += 1) {
+          for (let c = cmin; c <= cmax; c += 1) {
+            if (next[r]) next[r][c] = ''
+          }
+        }
+        return next
+      })
+      setDirty(true)
+      setSelRange(null)
+      setStatus(`已清空选区 ${rmax - rmin + 1}×${cmax - cmin + 1}`)
+      return
+    }
+    if (selRowsRef.current.size > 0) {
+      clearRows(Array.from(selRowsRef.current))
+      return
+    }
+    const { r, c } = activeRef.current
+    clearCell(r, c)
+  }, [pushUndo, clearRows, clearCell])
+
   const pasteTSV = useCallback((text: string, start: { r: number; c: number }) => {
     const cleaned = text.replace(/\r/g, '')
     const lines = cleaned.split('\n')
@@ -658,7 +787,11 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
       setStatus('剪贴板为空，或请改用 Ctrl+V 粘贴')
       return
     }
-    pasteTSV(text, { r, c })
+    // 若有矩形框选，从选区左上角开始粘贴；否则从右键的格开始
+    const range = selRangeRef.current
+    const start = range ? { r: Math.min(range.r1, range.r2), c: Math.min(range.c1, range.c2) } : { r, c }
+    pasteTSV(text, start)
+    if (range) setSelRange(null)
     setStatus('已粘贴')
   }, [pasteTSV])
 
@@ -852,6 +985,13 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
     e.stopPropagation()
     // 右键落在未选中的行 → 清掉旧的行选择（Excel 习惯）
     if (!selRowsRef.current.has(r)) setSelRows(new Set())
+    // 右键落在矩形框选区域外 → 清除框选，改为单格菜单（Excel 习惯）
+    const sr = selRangeRef.current
+    if (sr) {
+      const inR = r >= Math.min(sr.r1, sr.r2) && r <= Math.max(sr.r1, sr.r2)
+      const inC = c >= Math.min(sr.c1, sr.c2) && c <= Math.max(sr.c1, sr.c2)
+      if (!inR || !inC) setSelRange(null)
+    }
     setActive({ r, c })
     setEditing(false)
     // 防止菜单溢出窗口
@@ -920,17 +1060,18 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
       case 'Delete':
       case 'Backspace':
         e.preventDefault()
-        // 选中了整行 → 清空这些行的内容（与 Excel 一致：Delete 只清内容不删行）
-        if (selRowsRef.current.size > 0) clearRows(Array.from(selRowsRef.current))
-        else clearCell(r, c)
+        // 清空当前选择的内容：矩形框选 > 整行选择 > 单格（与 Excel 一致：Delete 只清内容不删行）
+        clearSelectionBlock()
         break
       default:
         if (e.ctrlKey || e.metaKey) {
           const k = e.key.toLowerCase()
           if (k === 'x') {
             e.preventDefault()
-            copyText(gridRef.current[r][c] || '')
-            clearCell(r, c)
+            // 剪切：把当前选择（矩形框选 > 整行 > 单格）复制到剪贴板并清空
+            const info = selBlockTSV()
+            copyText(info.tsv)
+            clearSelectionBlock()
           } else if (k === 's') {
             e.preventDefault()
             void handleSave()
@@ -956,43 +1097,52 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
         // 可打印字符：直接替换进入编辑
         if (e.key.length === 1 && !e.altKey) {
           e.preventDefault()
-          startEdit(r, c, e.key)
+          // 有矩形框选时：清空整个选区，然后在选区左上角进入编辑（相当于"键入替换选区"）
+          const range = selRangeRef.current
+          if (range) {
+            const r1 = Math.min(range.r1, range.r2)
+            const c1 = Math.min(range.c1, range.c2)
+            clearSelectionBlock()
+            setActive({ r: r1, c: c1 })
+            setEditing(true)
+            focusContainer()
+          } else {
+            startEdit(r, c, e.key)
+          }
         }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nav, startEdit, clearCell, copyText, undo, redo, clearRows, deleteRows])
+  }, [nav, startEdit, clearCell, copyText, undo, redo, clearRows, deleteRows, selBlockTSV, clearSelectionBlock, focusContainer])
 
   /* ===================== 原生复制 / 粘贴 / 剪切 ===================== */
   const onCopy = (e: React.ClipboardEvent) => {
     if (editingRef.current) return // 编辑态让文本框自己复制
     e.preventDefault()
-    const { r, c } = activeRef.current
-    // 选中了整行 → 整行按 TSV 复制（可直接粘回 Excel 或本网格其它位置）
-    if (selRowsRef.current.size > 0) {
-      const idx = Array.from(selRowsRef.current).sort((a, b) => a - b)
-      const tsv = idx.map((i) => (gridRef.current[i] || emptyRow()).join('\t')).join('\n')
-      e.clipboardData.setData('text/plain', tsv)
-      lastCopyRef.current = tsv
-      setStatus(`已复制 ${idx.length} 行`)
-      return
-    }
-    const val = gridRef.current[r]?.[c] || ''
-    e.clipboardData.setData('text/plain', val)
-    lastCopyRef.current = val
+    const info = selBlockTSV()
+    e.clipboardData.setData('text/plain', info.tsv)
+    lastCopyRef.current = info.tsv
+    if (info.rows > 1 || info.cols > 1) setStatus(`已复制选区 ${info.rows}×${info.cols}`)
+    else setStatus('已复制')
   }
   const onCut = (e: React.ClipboardEvent) => {
     if (editingRef.current) return
     e.preventDefault()
-    const { r, c } = activeRef.current
-    copyText(gridRef.current[r][c] || '')
-    clearCell(r, c)
+    const info = selBlockTSV()
+    e.clipboardData.setData('text/plain', info.tsv)
+    lastCopyRef.current = info.tsv
+    clearSelectionBlock()
   }
   const onPaste = (e: React.ClipboardEvent) => {
-    const { r, c } = activeRef.current
     if (editingRef.current) return // 编辑态让文本框自己粘贴
     e.preventDefault()
     const text = e.clipboardData.getData('text')
-    if (text) pasteTSV(text, { r, c })
+    if (!text) return
+    const range = selRangeRef.current
+    const start = range
+      ? { r: Math.min(range.r1, range.r2), c: Math.min(range.c1, range.c2) }
+      : activeRef.current
+    pasteTSV(text, start)
+    if (range) setSelRange(null)
   }
 
   /* ===================== 保存（覆盖更新，剥离尾部空行） ===================== */
@@ -1366,13 +1516,23 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
                 {row.map((val, c) => {
                   const isActive = active.r === r && active.c === c
                   const isEdit = isActive && editing
+                  const sr = selRange
+                  const inSel = sr
+                    ? r >= Math.min(sr.r1, sr.r2) &&
+                      r <= Math.max(sr.r1, sr.r2) &&
+                      c >= Math.min(sr.c1, sr.c2) &&
+                      c <= Math.max(sr.c1, sr.c2)
+                    : false
                   const cls =
                     'cell' +
                     (COLUMNS[c].type === 'number' ? ' cell-num' : '') +
-                    (isActive ? ' cell-active' : '')
+                    (isActive ? ' cell-active' : '') +
+                    (inSel ? ' cell-range' : '')
                   return (
                     <td
                       key={c}
+                      data-r={r}
+                      data-c={c}
                       className={isActive ? 'td-active' : c === active.c ? 'col-active' : ''}
                       ref={isActive ? activeTdRef : undefined}
                       onContextMenu={(e) => openMenu(e, r, c)}
@@ -1384,6 +1544,7 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
                           <div
                             className={cls}
                             title={val ? val : undefined}
+                            onMouseDown={(e) => onCellMouseDown(e, r, c)}
                             onClick={() => handleCellClick(r, c)}
                             onDoubleClick={() => {
                               startEdit(r, c)
@@ -1457,7 +1618,11 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
         return (
           <div className="ctx-menu" style={{ left: menu.x, top: menu.y }}>
             {item('复制', 'Ctrl+C', () => {
-              if (many) {
+              if (selRange) {
+                const info = selBlockTSV()
+                copyText(info.tsv)
+                setStatus(`已复制选区 ${info.rows}×${info.cols}`)
+              } else if (many) {
                 const tsv = rows.map((i) => (gridRef.current[i] || emptyRow()).join('\t')).join('\n')
                 copyText(tsv)
                 setStatus(`已复制 ${rows.length} 行`)
@@ -1468,13 +1633,20 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
               }
             })}
             {item('剪切', 'Ctrl+X', () => {
-              copyText(gridRef.current[menu.r]?.[menu.c] || '')
-              clearCell(menu.r, menu.c)
+              if (selRange) {
+                const info = selBlockTSV()
+                copyText(info.tsv)
+                clearSelectionBlock()
+              } else {
+                copyText(gridRef.current[menu.r]?.[menu.c] || '')
+                clearCell(menu.r, menu.c)
+              }
             })}
             {item('粘贴', 'Ctrl+V', () => void pasteFromClipboard(menu.r, menu.c))}
             <div className="ctx-sep" />
             {item('清空内容', 'Delete', () => {
-              if (many || selRowsRef.current.size > 0) clearRows(rows)
+              if (selRange) clearSelectionBlock()
+              else if (many || selRowsRef.current.size > 0) clearRows(rows)
               else clearCell(menu.r, menu.c)
             })}
             <div className="ctx-sep" />
@@ -1494,9 +1666,8 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
       <div className="sheet-footer">
         <span className="sheet-meta">共 {grid.length} 行 · 合计金额 <b>{fmtNum(totalAmount)}</b></span>
         <span className="memo-hint">
-          点单元格选中，双击或打字即进入编辑 ·
+          点单元格选中，双击或打字即进入编辑 · 在单元格上按住左键拖动可<b>框选</b>一片区域，用于复制 / 粘贴 / 删除 ·
           序号格右下角小方块可向下拖动，自动生成 1,2,3… 序列 · 右键「序号自动编号」可从本行一键编号到底 ·
-          日期列直接输入或 Ctrl+V 粘贴，支持 2026/8/11、8-11、20260811 等格式自动转换 ·
           日期列直接输入或 Ctrl+V 粘贴，支持 2026/8/11、8-11、20260811 等格式自动转换 ·
           文本列输入时按前缀弹出同列历史补全（↑↓ 选择 · Enter/Tab 确认 · Esc 关闭）·
           <b>Ctrl+D</b> 复制上一行（右键"复制此行到下方"亦可直接加副本）·

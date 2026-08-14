@@ -844,6 +844,10 @@ body {
   text-align: right;
   font-variant-numeric: tabular-nums;
 }
+/* 矩形框选高亮：选中区域内单元格淡蓝底（激活格另有 .td-active 蓝色描边） */
+.cell-range {
+  background: rgba(64, 158, 255, 0.16);
+}
 
 /* 序号列填充柄（Excel 式拖拽填充序列）：激活序号格右下角的小方块 */
 .fill-handle {
