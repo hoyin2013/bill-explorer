@@ -23,6 +23,7 @@ const COL_COUNT = COLUMNS.length
 const qtyIdx = COLUMNS.findIndex((c) => c.field === 'qty')
 const priceIdx = COLUMNS.findIndex((c) => c.field === 'price')
 const amountIdx = COLUMNS.findIndex((c) => c.field === 'amount')
+const noIdx = COLUMNS.findIndex((c) => c.field === 'no')
 const MIN_COL_WIDTH = 50
 const PREPARED_EMPTY_ROWS = 12 // 打开时在已有数据下方预备的空行，方便连续快捷录入
 
@@ -110,6 +111,9 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
   const [saving, setSaving] = useState(false)
   const [status, setStatus] = useState('')
   const [loaded, setLoaded] = useState(false)
+  // 序号列拖拽填充（Excel 式填充柄）：startR=种子行，endR=拖动到的行，拖动时高亮该区间
+  const [fill, setFill] = useState<{ startR: number; endR: number } | null>(null)
+  const fillDragRef = useRef<{ startR: number; seed: number; valid: boolean; endR: number } | null>(null)
 
   // 接收独立"小票识图"窗口发来的回填请求（用户主动点击"填入当前录入"才触发，不影响录入）
   const applyRowsRef = useRef(applyRecognizedRows)
@@ -255,11 +259,10 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
       setGrid(rows)
       setAutoRows(new Set())
       setInputRow(target)
-      setActive({ r: target, c: 0 }) // 光标定位到最底下（数据末尾）第一列
+      setActive({ r: target, c: 0 }) // 光标定位到最底下（数据末尾）第一列（序号列），便于用填充柄批量生成序号
       setLoaded(true)
       setStatus('')
-      // 自动进入编辑，打开即可直接打字录入
-      setEditing(true)
+      // 不自动进入编辑态：打开时不要弹出序号编辑框（需要录入时单击/双击或按字符即可进入）
     })()
     return () => {
       cancelled = true
@@ -395,6 +398,103 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
     if (isRowEmpty(gridRef.current[r])) setInputRow(r)
     selectCell(r, c)
   }, [selectCell])
+
+  // 序号列填充柄：按住右下角小方块向下拖动，按 Excel 习惯生成 1,2,3… 递增序列。
+  // 种子为该序号格当前数值；拖动区间 [min,max] 内除种子外 = seed ± offset。
+  // 仅作用于序号列（noIdx），避免数量/单价/金额等数值列被误填充。
+  const onFillHandleDown = useCallback((e: React.MouseEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    const sr = activeRef.current.r
+    const seedStr = String(gridRef.current[sr]?.[noIdx] ?? '').trim()
+    const seedNum = Number(seedStr)
+    // 仅当种子为纯整数时才做递增序列；否则（空/非数字）退化为整列复制
+    const valid = seedStr !== '' && Number.isFinite(seedNum) && !/\D/.test(seedStr)
+    const info: { startR: number; seed: number; valid: boolean; endR: number } = {
+      startR: sr,
+      seed: seedNum,
+      valid,
+      endR: sr,
+    }
+    fillDragRef.current = info
+    setFill({ startR: sr, endR: sr })
+    document.body.style.cursor = 'crosshair'
+
+    const onMove = (me: MouseEvent) => {
+      const td = activeTdRef.current
+      if (!td) return
+      const rect = td.getBoundingClientRect()
+      const rowH = rect.height || 22
+      const off = Math.round((me.clientY - rect.top) / rowH)
+      let endR = info.startR + off
+      endR = Math.max(0, Math.min(gridRef.current.length - 1, endR))
+      info.endR = endR
+      setFill({ startR: info.startR, endR })
+    }
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+      document.body.style.cursor = ''
+      const f = fillDragRef.current
+      fillDragRef.current = null
+      setFill(null)
+      if (!f || f.endR === f.startR) return
+      pushUndo()
+      lastCommitKeyRef.current = null
+      const minR = Math.min(f.startR, f.endR)
+      const maxR = Math.max(f.startR, f.endR)
+      setGrid((prev) => {
+        const next = prev.map((row) => row.slice())
+        for (let rr = minR; rr <= maxR; rr += 1) {
+          if (rr === f.startR) continue
+          const offset = rr - f.startR
+          const v = f.valid ? String(f.seed + offset) : next[f.startR]?.[noIdx] ?? ''
+          if (!next[rr]) next[rr] = emptyRow()
+          next[rr][noIdx] = v
+        }
+        return next
+      })
+      setDirty(true)
+      setStatus(`已填充序号序列 ${Math.abs(f.endR - f.startR)} 行`)
+      focusContainer()
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+  }, [pushUndo, focusContainer])
+
+  // 序号自动编号：从 start 行向下，给序号列依次填 1,2,3…，直到末尾数据行。
+  // 种子取本行已有整数（可续编），否则从 1 开始；末尾行 = 自底向上第一个非空行，避免给空白预备行编号。
+  const autoNumber = useCallback((start: number) => {
+    const rows = gridRef.current
+    // 末尾数据行：自底向上找第一个非空行（只在该区间内编号）
+    let end = -1
+    for (let r = rows.length - 1; r >= start; r -= 1) {
+      if (!isRowEmpty(rows[r])) {
+        end = r
+        break
+      }
+    }
+    if (end < start) {
+      setStatus('本行以下没有可编号的数据')
+      return
+    }
+    const seedStr = String(rows[start]?.[noIdx] ?? '').trim()
+    const seedNum = Number(seedStr)
+    const seed = seedStr !== '' && Number.isFinite(seedNum) && !/\D/.test(seedStr) ? seedNum : 1
+    pushUndo()
+    lastCommitKeyRef.current = null
+    setGrid((prev) => {
+      const next = prev.map((row) => row.slice())
+      for (let r = start; r <= end; r += 1) {
+        if (!next[r]) next[r] = emptyRow()
+        next[r][noIdx] = String(seed + (r - start))
+      }
+      return next
+    })
+    setDirty(true)
+    setStatus(`已自动编号 ${end - start + 1} 行（${seed}→${seed + (end - start)}）`)
+    focusContainer()
+  }, [pushUndo, focusContainer])
 
   /* ===================== 行操作：插入 / 删除 / 清空 ===================== */
   // 删除若干整行（真正移除，行号会重排）；删完保证底部仍有预备空行可继续录入
@@ -1241,7 +1341,10 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
                   (r === entryRow ? 'entry-row' : '') +
                   (r === active.r ? ' row-active' : '') +
                   (selRows.has(r) ? ' row-selected' : '') +
-                  (autoRows.has(r) ? ' row-auto' : '')
+                  (autoRows.has(r) ? ' row-auto' : '') +
+                  (fill && r >= Math.min(fill.startR, fill.endR) && r <= Math.max(fill.startR, fill.endR)
+                    ? ' fill-range'
+                    : '')
                 }
               >
                 <td
@@ -1277,16 +1380,25 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
                       {isEdit ? (
                         renderEditor(r, c, val)
                       ) : (
-                        <div
-                          className={cls}
-                          title={val ? val : undefined}
-                          onClick={() => handleCellClick(r, c)}
-                          onDoubleClick={() => {
-                            startEdit(r, c)
-                          }}
-                        >
-                          {val}
-                        </div>
+                        <>
+                          <div
+                            className={cls}
+                            title={val ? val : undefined}
+                            onClick={() => handleCellClick(r, c)}
+                            onDoubleClick={() => {
+                              startEdit(r, c)
+                            }}
+                          >
+                            {val}
+                          </div>
+                          {loaded && isActive && c === noIdx && (
+                            <div
+                              className="fill-handle"
+                              title="拖动向下填充序号序列（1,2,3…）"
+                              onMouseDown={onFillHandleDown}
+                            />
+                          )}
+                        </>
                       )}
                     </td>
                   )
@@ -1369,6 +1481,8 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
             {item('上方插入行', '', () => insertRows(menu.r, rows.length))}
             {item('下方插入行', '', () => insertRows(menu.r + 1, rows.length))}
             {item(many ? '复制选中行到下方' : '复制此行到下方', 'Ctrl+D', () => duplicateRowsBelow(rows))}
+            <div className="ctx-sep" />
+            {item('序号自动编号', '从本行向下到末尾', () => autoNumber(menu.r))}
             {item(many ? `删除选中的 ${rows.length} 行` : '删除本行', 'Ctrl+-', () => deleteRows(rows))}
             <div className="ctx-sep" />
             {item('撤销', 'Ctrl+Z', () => undo(), histLen.undo === 0)}
@@ -1381,6 +1495,8 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
         <span className="sheet-meta">共 {grid.length} 行 · 合计金额 <b>{fmtNum(totalAmount)}</b></span>
         <span className="memo-hint">
           点单元格选中，双击或打字即进入编辑 ·
+          序号格右下角小方块可向下拖动，自动生成 1,2,3… 序列 · 右键「序号自动编号」可从本行一键编号到底 ·
+          日期列直接输入或 Ctrl+V 粘贴，支持 2026/8/11、8-11、20260811 等格式自动转换 ·
           日期列直接输入或 Ctrl+V 粘贴，支持 2026/8/11、8-11、20260811 等格式自动转换 ·
           文本列输入时按前缀弹出同列历史补全（↑↓ 选择 · Enter/Tab 确认 · Esc 关闭）·
           <b>Ctrl+D</b> 复制上一行（右键"复制此行到下方"亦可直接加副本）·

@@ -845,6 +845,27 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+/* 序号列填充柄（Excel 式拖拽填充序列）：激活序号格右下角的小方块 */
+.fill-handle {
+  position: absolute;
+  right: -4px;
+  bottom: -4px;
+  width: 8px;
+  height: 8px;
+  background: #409eff;
+  border: 1px solid #fff;
+  border-radius: 1px;
+  cursor: crosshair;
+  z-index: 6;
+}
+.fill-handle:hover {
+  background: #2d8cf0;
+}
+/* 拖拽填充时高亮的目标区间 */
+.fill-range td {
+  background: #d6e8ff !important;
+}
+
 /* 已有内容的单元格：单击即复制到当前录入行，给出复制光标与悬停提示 */
 .cell-copy-src {
   cursor: copy;
