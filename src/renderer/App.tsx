@@ -516,7 +516,7 @@ function AppInner({ api }: { api: ElectronAPI }) {
                 <li><b>↑↓←→</b>　在单元格间移动焦点</li>
                 <li><b>Enter / 双击</b>　进入编辑；编辑中 <b>Enter</b> 下一行、<b>Tab</b> 右移</li>
                 <li><b>Ctrl+C / V / X</b>　复制 / 粘贴 / 剪切，支持从 Excel 直接粘贴整块</li>
-                <li><b>日期格</b>　点一下弹出日期选择器</li>
+                <li><b>日期列</b>　直接输入或粘贴，支持 2026/8/11、8-11 等多种格式自动转换</li>
                 <li><b>Ctrl+S</b>　保存（覆盖整表，自动去掉尾部空行）</li>
                 <li>搜索支持拼音首字母，如 <b>wjy</b> 找「王金玉」</li>
               </ul>

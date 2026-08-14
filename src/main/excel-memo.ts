@@ -523,32 +523,26 @@ export async function loadSheet(filePath: string): Promise<SheetData> {
   const headerMatched = HEADER.some((f) => findColByLabel(headerRow, f.label) !== 0)
   const dataStart = headerMatched ? 2 : 1
 
-  // 末行有数据行（从底向上扫描，跳过尾部空行）
-  let lastDataRow = dataStart - 1
-  for (let r = ws.rowCount; r >= dataStart; r -= 1) {
-    let has = false
-    for (let c = 1; c <= HEADER.length; c += 1) {
-      const v = ws.getRow(r).getCell(c).value
-      if (v !== undefined && v !== null && String(v).trim() !== '') {
-        has = true
-        break
-      }
-    }
-    if (has) {
-      lastDataRow = r
-      break
-    }
-  }
-
+  // 单次遍历读取数据：用 eachRow 只迭代「有值」的行（自动跳过尾部 / 中间的空行），
+  // 一边读一边记录最后一行有数据的位置，省去原来「自底向上扫描找末行 + 自顶向下再读一遍」两遍遍历。
+  // 对末尾存在大量空行的不规范文件，原写法要 O(rowCount × 9) 逐个单元格判断，
+  // 现在 eachRow 对空行只做一次 hasValues 判空，几乎零成本，打开速度显著提升。
   const rows: string[][] = []
-  for (let r = dataStart; r <= lastDataRow; r += 1) {
-    const row = ws.getRow(r)
+  let lastDataRow = dataStart - 1
+  ws.eachRow((row, rowNumber) => {
+    if (rowNumber < dataStart) return // 跳过表头行
     const arr: string[] = []
+    let any = false
     HEADER.forEach((f) => {
-      arr.push(cellToText(row.getCell(colMap[f.key]).value))
+      const t = cellToText(row.getCell(colMap[f.key]).value)
+      arr.push(t)
+      if (t.trim() !== '') any = true
     })
+    // 整行无实质内容（如仅残留格式/空格的行）→ 跳过，避免生成空行/脏行
+    if (!any) return
     rows.push(arr)
-  }
+    lastDataRow = rowNumber
+  })
 
   return { sheetName: ws.name || '', headerLabels, rows }
 }

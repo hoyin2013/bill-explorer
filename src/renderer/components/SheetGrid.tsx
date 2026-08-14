@@ -10,7 +10,7 @@ interface ColDef {
 }
 const COLUMNS: ColDef[] = [
   { field: 'no', label: '序号', type: 'text', width: 40 },
-  { field: 'date', label: '日期', type: 'date', width: 90 },
+  { field: 'date', label: '日期', type: 'text', width: 90 },
   { field: 'name', label: '货品名称', type: 'text', width: 172 },
   { field: 'unit', label: '单位', type: 'text', width: 60 },
   { field: 'qty', label: '数量', type: 'number', width: 56 },
@@ -23,7 +23,6 @@ const COL_COUNT = COLUMNS.length
 const qtyIdx = COLUMNS.findIndex((c) => c.field === 'qty')
 const priceIdx = COLUMNS.findIndex((c) => c.field === 'price')
 const amountIdx = COLUMNS.findIndex((c) => c.field === 'amount')
-const dateIdx = COLUMNS.findIndex((c) => c.field === 'date')
 const MIN_COL_WIDTH = 50
 const PREPARED_EMPTY_ROWS = 12 // 打开时在已有数据下方预备的空行，方便连续快捷录入
 
@@ -95,25 +94,6 @@ function parseDateText(input: string): string {
   }
   return ''
 }
-// 主动展开原生日历：单纯 focus() 不会弹出，必须调用 showPicker()（Chrome 99+）。
-// 关键：**不要** focus 这个隐藏 input —— 焦点必须留在旁边的文本框上，
-// 否则日历被 Esc 关掉后焦点卡在隐藏 input 上，光标消失且打字无效。
-// showPicker 不要求元素持有焦点；只有抛错时才退回"先聚焦再弹"。
-function openPicker(el: HTMLInputElement) {
-  const withPicker = el as HTMLInputElement & { showPicker?: () => void }
-  if (typeof withPicker.showPicker !== 'function') return
-  try {
-    withPicker.showPicker()
-  } catch {
-    try {
-      el.focus()
-      withPicker.showPicker()
-    } catch {
-      /* showPicker 需要用户手势，失败就放弃弹日历，文本框仍可手输 */
-    }
-  }
-}
-
 interface Props {
   file: FileEntry
   api: ElectronAPI
@@ -175,16 +155,6 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
   inputRowRef.current = inputRow
   // 指向当前激活单元格的 <td>，用于滚动到可视区域
   const activeTdRef = useRef<HTMLTableCellElement | null>(null)
-  // 是否需要在进入日期编辑态后主动弹出日历：
-  // 仅双击日期格 / 点日历按钮时置 true；单击与键盘导航不弹，
-  // 因为原生日历弹层会接管键盘，页面收不到 Ctrl+V，会让粘贴失效
-  const wantPickerRef = useRef(false)
-  // 日期格里那个不可见的 <input type="date">，只用来调 showPicker() 弹原生日历
-  const datePickerRef = useRef<HTMLInputElement | null>(null)
-  // 焦点在日期格内部转移到隐藏 date input 时，不要把它当成"失焦退出编辑"
-  const suppressBlurRef = useRef(false)
-  // 正在编辑的日期格：退出编辑时把自由文本统一规范化成 yyyy-mm-dd
-  const dateEditRef = useRef<{ r: number; c: number } | null>(null)
   const selRowsRef = useRef(selRows)
   selRowsRef.current = selRows
   // 撤销 / 重做栈：存整表快照（string[][]），账本行数量级下开销可忽略
@@ -310,15 +280,6 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
     } catch {
       /* 某些 input 类型不支持 setSelectionRange */
     }
-    // 只有双击日期格 / 点日历按钮时才弹原生日历
-    if (wantPickerRef.current && datePickerRef.current) {
-      wantPickerRef.current = false
-      suppressBlurRef.current = true
-      openPicker(datePickerRef.current)
-      window.setTimeout(() => {
-        suppressBlurRef.current = false
-      }, 400)
-    }
   }, [editing, active])
 
   // 激活单元格滚动到可视区域：首次（打开时）居中，便于同时看到下方预备的空行；
@@ -338,26 +299,6 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
   useEffect(() => {
     didInitialScroll.current = false
   }, [file.filePath])
-
-  // 退出日期格编辑时，把自由输入/粘贴进来的文本统一规范化成 yyyy-mm-dd
-  // （编辑期间保留原文，否则打到一半就被改写，没法正常输入）
-  useEffect(() => {
-    if (editing) return
-    const t = dateEditRef.current
-    if (!t) return
-    dateEditRef.current = null
-    const raw = String(gridRef.current[t.r]?.[t.c] ?? '')
-    if (!raw.trim() || /^\d{4}-\d{2}-\d{2}$/.test(raw)) return
-    const iso = parseDateText(raw)
-    // 静默写入：不再入撤销栈（这一格的输入本身已经入过）
-    if (iso && iso !== raw) {
-      setGrid((prev) => {
-        const next = prev.map((row) => row.slice())
-        if (next[t.r]) next[t.r][t.c] = iso
-        return next
-      })
-    }
-  }, [editing])
 
   // 换格即断开撤销合并：下一格的第一次输入会成为独立的一步
   // （只依赖 active，不依赖 editing —— 否则"打字直接进编辑"会被拆成两步撤销）
@@ -447,35 +388,13 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
     }
   }, [])
 
-  // 单击单元格：
-  // · 点其它行"已有内容"的单元格 → 复制该值到系统剪贴板（含日期；不弹选择器、不就地改）
-  //   之后到目标空格 Ctrl+V 粘贴即可
-  // · 点空单元格 / 录入行本身 → 设为录入行；空日期格弹出选择器，其它列选中待录入
+  // 单击单元格：选中并激活该格（复制请用 Ctrl+C / 右键菜单 / Ctrl+X 剪切）
   const handleCellClick = useCallback((r: number, c: number) => {
-    const val = String(gridRef.current[r]?.[c] ?? '')
-    const ir = inputRowRef.current
     // 点普通单元格即取消整行选择（Excel 习惯），避免 Delete 误清掉之前选的行
     if (selRowsRef.current.size > 0) setSelRows(new Set())
-    if (val.trim() !== '' && r !== ir) {
-      // 复制到剪贴板（不塞进下方单元格）
-      copyText(val)
-      setActive({ r, c })
-      setEditing(false)
-      focusContainer()
-      const brief = val.replace(/\s+/g, ' ').trim()
-      setStatus('已复制：' + (brief.length > 20 ? brief.slice(0, 20) + '…' : brief))
-      return
-    }
-    // 空单元格 / 录入行本身
     if (isRowEmpty(gridRef.current[r])) setInputRow(r)
-    if (COLUMNS[c].type === 'date' && val.trim() === '') {
-      // 空日期格：进入文本编辑态（光标 I 形，可直接 Ctrl+V 或打字），
-      // 不自动弹日历 —— 原生日历会接管键盘导致粘贴失效；要日历点格内按钮或双击
-      startEdit(r, c)
-    } else {
-      selectCell(r, c)
-    }
-  }, [copyText, selectCell, startEdit])
+    selectCell(r, c)
+  }, [selectCell])
 
   /* ===================== 行操作：插入 / 删除 / 清空 ===================== */
   // 删除若干整行（真正移除，行号会重排）；删完保证底部仍有预备空行可继续录入
@@ -610,7 +529,7 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
           const c = start.c + j
           if (c >= COL_COUNT) return
           // 落到日期列的内容统一规范化成 yyyy-mm-dd（识别不了就原样保留）
-          if (COLUMNS[c].type === 'date') {
+          if (COLUMNS[c].field === 'date') {
             const iso = parseDateText(val)
             next[start.r + i][c] = iso || val.trim()
           } else {
@@ -970,21 +889,7 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
   }
   const onPaste = (e: React.ClipboardEvent) => {
     const { r, c } = activeRef.current
-    if (editingRef.current) {
-      // 日期编辑态：只取第一段（避免从 Excel 复制的整块塞进一格），并尽量规范化成 ISO；
-      // 识别不了就原样填入，让用户看到并手改，而不是静默丢弃
-      if (COLUMNS[c].type === 'date') {
-        e.preventDefault()
-        const text = e.clipboardData.getData('text')
-        const first = (text.split(/[\t\n]/)[0] || '').trim()
-        if (!first) return
-        const iso = parseDateText(first)
-        commitCell(r, c, iso || first)
-        setStatus(iso ? '已粘贴日期 ' + iso : '无法识别的日期：' + first.slice(0, 20))
-        return
-      }
-      return // 其它列编辑态让文本框自己粘贴
-    }
+    if (editingRef.current) return // 编辑态让文本框自己粘贴
     e.preventDefault()
     const text = e.clipboardData.getData('text')
     if (text) pasteTSV(text, { r, c })
@@ -1192,86 +1097,7 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
           focusContainer()
         }
       },
-      onBlur: () => {
-        // 日期格内部把焦点让给隐藏的 date input 时不算失焦，否则日历刚弹出就被关掉
-        if (suppressBlurRef.current) return
-        setEditing(false)
-      },
-    }
-    if (col.type === 'date') {
-      // 编辑器用 text 而非 date：光标是 I 形、Ctrl+V 原生可用、也不会有"年/月/日"占位。
-      // 日历改由右侧按钮里的隐藏 date input 弹出（原生日历一旦弹出就会接管键盘，
-      // 页面收不到 Ctrl+V，所以不能让它默认占着编辑态）。
-      dateEditRef.current = { r, c }
-      const iso = /^\d{4}-\d{2}-\d{2}$/.test(val) ? val : ''
-      const openCalendar = () => {
-        if (!datePickerRef.current) return
-        suppressBlurRef.current = true
-        openPicker(datePickerRef.current)
-        window.setTimeout(() => {
-          suppressBlurRef.current = false
-        }, 400)
-      }
-      return (
-        <div className="date-edit" style={{ width: '100%' }}>
-          <input
-            {...common}
-            type="text"
-            className="cell-editor cell-editor-datetext"
-            style={{ flex: 1, minWidth: 0 }}
-            value={val}
-            onChange={(e) => commitCell(r, c, e.target.value)}
-            onKeyDown={(e) => {
-              // Alt+↓ / F4：键盘也能唤出日历（Excel 下拉习惯）
-              if ((e.altKey && e.key === 'ArrowDown') || e.key === 'F4') {
-                e.preventDefault()
-                openCalendar()
-                return
-              }
-              common.onKeyDown(e)
-            }}
-          />
-          {/* 只用于弹原生日历；视觉上藏在按钮下面 */}
-          <input
-            ref={datePickerRef}
-            type="date"
-            className="date-pick-native"
-            tabIndex={-1}
-            value={iso}
-            onChange={(e) => {
-              const v = e.target.value
-              if (!v) return
-              commitCell(r, c, v)
-              // 正常情况下焦点从未离开文本框（openPicker 不抢焦点）；
-              // 只有走了 focus 兜底路径时才需要还回去，便于继续 Tab 往右录入
-              if (document.activeElement !== editRef.current) {
-                suppressBlurRef.current = true
-                window.setTimeout(() => {
-                  editRef.current?.focus()
-                  suppressBlurRef.current = false
-                }, 0)
-              }
-            }}
-          />
-          <button
-            type="button"
-            className="date-pick-btn"
-            tabIndex={-1}
-            title="打开日历（Alt+↓）"
-            onMouseDown={(e) => {
-              e.preventDefault() // 别让文本框失焦
-              openCalendar()
-            }}
-          >
-            <svg viewBox="0 0 16 16" width="12" height="12" aria-hidden="true">
-              <path
-                fill="currentColor"
-                d="M5 1v2H3.5A1.5 1.5 0 0 0 2 4.5v9A1.5 1.5 0 0 0 3.5 15h9a1.5 1.5 0 0 0 1.5-1.5v-9A1.5 1.5 0 0 0 12.5 3H11V1H9.5v2h-3V1H5Zm7.5 5.5v7h-9v-7h9Z"
-              />
-            </svg>
-          </button>
-        </div>
-      )
+      onBlur: () => setEditing(false),
     }
     const rows = Math.min(6, Math.max(1, val.split('\n').length))
     return (
@@ -1437,13 +1263,10 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
                 {row.map((val, c) => {
                   const isActive = active.r === r && active.c === c
                   const isEdit = isActive && editing
-                  // 已有内容且不在录入行 → 单击即复制到剪贴板（给出复制光标提示）
-                  const isCopySrc = String(val).trim() !== '' && r !== inputRow
                   const cls =
                     'cell' +
                     (COLUMNS[c].type === 'number' ? ' cell-num' : '') +
-                    (isActive ? ' cell-active' : '') +
-                    (isCopySrc ? ' cell-copy-src' : '')
+                    (isActive ? ' cell-active' : '')
                   return (
                     <td
                       key={c}
@@ -1456,11 +1279,9 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
                       ) : (
                         <div
                           className={cls}
-                          title={isCopySrc ? '点一下复制到剪贴板，再到目标格 Ctrl+V（双击可就地修改）' : (val ? val : undefined)}
+                          title={val ? val : undefined}
                           onClick={() => handleCellClick(r, c)}
                           onDoubleClick={() => {
-                            // 双击就地编辑；日期列同时弹出日历，便于改旧日期
-                            if (COLUMNS[c].type === 'date') wantPickerRef.current = true
                             startEdit(r, c)
                           }}
                         >
@@ -1559,14 +1380,13 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
       <div className="sheet-footer">
         <span className="sheet-meta">共 {grid.length} 行 · 合计金额 <b>{fmtNum(totalAmount)}</b></span>
         <span className="memo-hint">
-          点已有内容的格 → 复制到剪贴板，到目标格 Ctrl+V 粘贴 ·
-          日期格点一下即可 Ctrl+V 粘贴或直接打字（2026/8/11、8-11 等格式自动转换），
-          要日历点格内 <b>日历按钮</b> 或双击（Alt+↓）·
+          点单元格选中，双击或打字即进入编辑 ·
+          日期列直接输入或 Ctrl+V 粘贴，支持 2026/8/11、8-11、20260811 等格式自动转换 ·
           文本列输入时按前缀弹出同列历史补全（↑↓ 选择 · Enter/Tab 确认 · Esc 关闭）·
           <b>Ctrl+D</b> 复制上一行（右键"复制此行到下方"亦可直接加副本）·
           <b>导入</b> 按钮可把 .csv/.tsv/.txt 追加到末尾 ·
           点左侧行号选整行（Ctrl/Shift 多选）· 右键菜单可删除/插入行 ·
-          Ctrl+Z 撤销 · ↑↓←→ 移动 · Enter 下行 · Tab 右移 · Ctrl+S 保存
+          Ctrl+C/V/X 复制粘贴剪切 · Ctrl+Z 撤销 · ↑↓←→ 移动 · Enter 下行 · Tab 右移 · Ctrl+S 保存
         </span>
         {status && (
           <span className={status.includes('失败') ? 'memo-status memo-error' : 'memo-status'}>
