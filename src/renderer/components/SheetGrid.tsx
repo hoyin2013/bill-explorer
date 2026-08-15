@@ -95,6 +95,40 @@ function parseDateText(input: string): string {
   }
   return ''
 }
+
+// 几何命中：根据鼠标坐标定位所在单元格（比 elementFromPoint 更稳，
+// 不会被填充柄 / 行号 / 单元格内边距干扰；拖到行号或列间隙也能正确归位）。
+// trs 为 tbody 内的数据行（顺序即行号 0..n）。
+function rowIndexAtY(trs: HTMLTableRowElement[], clientY: number): number {
+  const last = trs.length - 1
+  if (last < 0) return 0
+  for (let i = 0; i <= last; i += 1) {
+    const rect = trs[i].getBoundingClientRect()
+    if (clientY <= rect.bottom) return i
+  }
+  return last
+}
+function cellAtPoint(
+  trs: HTMLTableRowElement[],
+  clientX: number,
+  clientY: number,
+): { r: number; c: number } {
+  if (trs.length === 0) return { r: 0, c: 0 }
+  const r = rowIndexAtY(trs, clientY)
+  const tds = trs[r].cells // [0]=行号, [1+c]=第 c 列
+  let c = 0
+  for (let i = 0; i < COL_COUNT; i += 1) {
+    const rect = tds[i + 1]?.getBoundingClientRect()
+    if (!rect) break
+    if (clientX <= rect.right) {
+      c = i
+      break
+    }
+    c = i
+  }
+  return { r, c }
+}
+
 interface Props {
   file: FileEntry
   api: ElectronAPI
@@ -167,7 +201,15 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
   const selRangeRef = useRef(selRange)
   selRangeRef.current = selRange
   // 框选拖拽过程的状态
-  const rangeDragRef = useRef<{ r1: number; c1: number; x: number; y: number; moved: boolean } | null>(null)
+  const rangeDragRef = useRef<{
+    r1: number
+    c1: number
+    x: number
+    y: number
+    moved: boolean
+    trs: HTMLTableRowElement[]
+    rowMode: boolean
+  } | null>(null)
   // 框选拖拽结束的尾随 click 不处理（否则会把刚框好的选区又清掉）
   const suppressClickRef = useRef(false)
   // 撤销 / 重做栈：存整表快照（string[][]），账本行数量级下开销可忽略
@@ -420,26 +462,17 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
     if (editingRef.current || e.button !== 0) return
     e.stopPropagation()
     if (selRowsRef.current.size > 0) setSelRows(new Set())
-    rangeDragRef.current = { r1: r, c1: c, x: e.clientX, y: e.clientY, moved: false }
+    const tbody = containerRef.current?.querySelector('tbody')
+    const trs = tbody ? (Array.from(tbody.rows) as HTMLTableRowElement[]) : []
+    rangeDragRef.current = { r1: r, c1: c, x: e.clientX, y: e.clientY, moved: false, trs, rowMode: false }
 
     const onMove = (me: MouseEvent) => {
       const d = rangeDragRef.current
       if (!d) return
       if (!d.moved && Math.hypot(me.clientX - d.x, me.clientY - d.y) < 4) return
       d.moved = true
-      // 用命中测试找光标所在的单元格（data-r/data-c 标在 <td> 上，含填充柄区域）
-      const el = document.elementFromPoint(me.clientX, me.clientY) as HTMLElement | null
-      const cell = el?.closest('[data-r]') as HTMLElement | null
-      let rr = d.r1
-      let cc = d.c1
-      if (cell && cell.dataset.c !== undefined) {
-        const dr = Number(cell.dataset.r)
-        const dc = Number(cell.dataset.c)
-        if (!Number.isNaN(dr) && !Number.isNaN(dc)) {
-          rr = dr
-          cc = dc
-        }
-      }
+      // 几何定位光标所在单元格（不依赖 elementFromPoint，避免命中填充柄/行号/内边距）
+      const { r: rr, c: cc } = cellAtPoint(d.trs, me.clientX, me.clientY)
       setSelRange({ r1: d.r1, c1: d.c1, r2: rr, c2: cc })
       setActive({ r: rr, c: cc })
     }
@@ -452,9 +485,9 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
         // 没移动 → 普通单击，清除框选（单选交给 onClick 处理）
         setSelRange(null)
       } else {
-        // 拖拽结束：把锚点设到选区左上角，便于后续粘贴/编号从起点开始；并吞掉尾随 click
-        const f = selRangeRef.current
-        if (f) setActive({ r: Math.min(f.r1, f.r2), c: Math.min(f.c1, f.c2) })
+        // 拖拽结束：激活格回到拖拽起点（Excel 习惯：活动单元格=按下处），
+        // 并吞掉尾随 click，避免刚框好的选区被单击清掉
+        setActive({ r: d.r1, c: d.c1 })
         suppressClickRef.current = true
         window.setTimeout(() => {
           suppressClickRef.current = false
@@ -972,6 +1005,45 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
     containerRef.current?.focus()
   }, [])
 
+  // 在行号上按住左键拖动 → 像 Excel 一样整段选中多行（Ctrl/Shift 交给 onClick 处理）
+  const onRowNumMouseDown = useCallback((e: React.MouseEvent, r: number) => {
+    if (editingRef.current || e.button !== 0) return
+    if (e.ctrlKey || e.metaKey || e.shiftKey) return // 修饰键走 onClick 的多选/连选
+    e.stopPropagation()
+    const tbody = containerRef.current?.querySelector('tbody')
+    const trs = tbody ? (Array.from(tbody.rows) as HTMLTableRowElement[]) : []
+    rangeDragRef.current = { r1: r, c1: 0, x: e.clientX, y: e.clientY, moved: false, trs, rowMode: true }
+
+    const onMove = (me: MouseEvent) => {
+      const d = rangeDragRef.current
+      if (!d) return
+      if (!d.moved && Math.hypot(me.clientX - d.x, me.clientY - d.y) < 4) return
+      d.moved = true
+      const rr = rowIndexAtY(d.trs, me.clientY)
+      const a = Math.min(r, rr)
+      const b = Math.max(r, rr)
+      const set = new Set<number>()
+      for (let i = a; i <= b; i += 1) set.add(i)
+      setSelRows(set)
+    }
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+      const d = rangeDragRef.current
+      rangeDragRef.current = null
+      if (!d || !d.moved) return // 没拖动 → 交给 onClick 单选整行
+      // 拖动选行结束：活动格回到起点行，吞掉尾随 click
+      setActive({ r: Math.min(r, d.r1), c: 0 })
+      suppressClickRef.current = true
+      window.setTimeout(() => {
+        suppressClickRef.current = false
+      }, 0)
+      focusContainer()
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+  }, [focusContainer])
+
   /* ===================== 右键菜单 ===================== */
   // 菜单作用的行集合：右键处在已选中的行里 → 整批；否则只作用于右键那一行
   const menuRows = useCallback((r: number): number[] => {
@@ -1397,6 +1469,12 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
     )
   }
 
+  // 存在多选区域（矩形框选或整行选择）时，不再显示"整行/整列"高亮带，
+  // 只保留选区本身与活动格边框——与 Excel 一致，避免误以为整行被选中
+  const bandOff =
+    (!!selRange && (selRange.r1 !== selRange.r2 || selRange.c1 !== selRange.c2)) ||
+    selRows.size > 0
+
   return (
     <div className="sheet-panel">
       <div className="memo-header">
@@ -1489,7 +1567,7 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
                 key={r}
                 className={
                   (r === entryRow ? 'entry-row' : '') +
-                  (r === active.r ? ' row-active' : '') +
+                  (r === active.r && !bandOff ? ' row-active' : '') +
                   (selRows.has(r) ? ' row-selected' : '') +
                   (autoRows.has(r) ? ' row-auto' : '') +
                   (fill && r >= Math.min(fill.startR, fill.endR) && r <= Math.max(fill.startR, fill.endR)
@@ -1499,7 +1577,8 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
               >
                 <td
                   className="rownum"
-                  title="点击选中整行（Ctrl 多选 / Shift 连选），右键可删除"
+                  title="点击选中整行（Ctrl 多选 / Shift 连选）；按住拖动可连选多行"
+                  onMouseDown={(e) => onRowNumMouseDown(e, r)}
                   onClick={(e) => onRowNumClick(r, e)}
                   onContextMenu={(e) => {
                     if (!selRowsRef.current.has(r)) {
@@ -1533,7 +1612,7 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
                       key={c}
                       data-r={r}
                       data-c={c}
-                      className={isActive ? 'td-active' : c === active.c ? 'col-active' : ''}
+                      className={isActive ? 'td-active' : c === active.c && !bandOff ? 'col-active' : ''}
                       ref={isActive ? activeTdRef : undefined}
                       onContextMenu={(e) => openMenu(e, r, c)}
                     >
