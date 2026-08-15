@@ -539,20 +539,22 @@ export async function loadSheet(filePath: string): Promise<SheetData> {
   // 一边读一边记录最后一行有数据的位置，省去原来「自底向上扫描找末行 + 自顶向下再读一遍」两遍遍历。
   // 对末尾存在大量空行的不规范文件，原写法要 O(rowCount × 9) 逐个单元格判断，
   // 现在 eachRow 对空行只做一次 hasValues 判空，几乎零成本，打开速度显著提升。
+  // 数据区内空行的不可见占位符（与 saveSheet 对应）
+  const PLACEHOLDER = '\u200b'
   const rows: string[][] = []
   let lastDataRow = dataStart - 1
   ws.eachRow((row, rowNumber) => {
     if (rowNumber < dataStart) return // 跳过表头行
     const arr: string[] = []
-    let any = false
     HEADER.forEach((f) => {
-      const t = cellToText(row.getCell(colMap[f.key]).value)
-      arr.push(t)
-      if (t.trim() !== '') any = true
+      arr.push(cellToText(row.getCell(colMap[f.key]).value))
     })
-    // 整行无实质内容（如仅残留格式/空格的行）→ 跳过，避免生成空行/脏行
-    if (!any) return
-    rows.push(arr)
+    // 整行无任何非空白内容（例如仅残留格式/旧空格的行）→ 跳过，避免生成空行/脏行
+    if (arr.every((t) => t.trim() === '')) return
+    // 整行仅由占位符构成（数据区空行被 saveSheet 用 \u00a0 占位）→ 还原为真正的空行，
+    // 使网格里表现为用户有意留的空行（且仍是“全空”语义，不影响导出/统计）。
+    const onlyPlaceholder = arr.every((t) => t === PLACEHOLDER || t.trim() === '')
+    rows.push(onlyPlaceholder ? HEADER.map(() => '') : arr)
     lastDataRow = rowNumber
   })
 
@@ -616,6 +618,14 @@ export async function saveSheet(
   const startRow = 2
   const lastNeeded = startRow + rows.length - 1
 
+  // 最后一个“有实质内容”的行（相对 rows 下标）。用于区分两类空行：
+  //  - 数据区内的空行（夹在两条有数据行之间，用户有意留的分隔行）→ 写入不可见占位，使其被 Excel 保留
+  //  - 末尾的空行（视为未使用的预分配行）→ 不加占位，按原逻辑剥离
+  let lastContent = -1
+  rows.forEach((arr, i) => {
+    if (arr.some((c) => String(c).trim() !== '')) lastContent = i
+  })
+
   // 写表头（强制 9 列一致）
   HEADER.forEach((f, i) => {
     const c = ws.getCell(1, i + 1)
@@ -623,9 +633,20 @@ export async function saveSheet(
     c.font = { bold: true }
   })
 
-  // 逐行写回，按列类型处理（日期/数字/文本）
+  // 逐行写回，按列类型处理（日期/数字/文本）。
+  // 对“数据区内”的全空行写入不可见占位符（不间断空格 \u00a0）：
+  // ExcelJS 不会把“所有单元格为空”的行写入文件，导致用户有意留的空行在保存后丢失；
+  // 用占位符让该行被写入，loadSheet 读回时再还原为真正的空行。
   rows.forEach((arr, i) => {
     const row = ws.getRow(startRow + i)
+    const isEmpty = !arr.some((c) => String(c).trim() !== '')
+    if (isEmpty) {
+      if (i <= lastContent) {
+        row.values = [] // 先清空（避免残留旧数据），再写占位
+        row.getCell(1).value = '\u200b'
+      }
+      return
+    }
     HEADER.forEach((f, ci) => {
       const cell = row.getCell(ci + 1)
       const raw = arr[ci] != null ? String(arr[ci]) : ''
