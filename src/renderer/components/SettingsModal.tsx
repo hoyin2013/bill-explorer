@@ -28,7 +28,6 @@ export function SettingsModal({ api, open, onClose, onSaved }: Props) {
     detectModel: '',
     enableDetect: true,
   })
-  const [nameList, setNameList] = useState<string[]>([])
   const [loading, setLoading] = useState(false)
   const [status, setStatus] = useState('')
   // 记录 mousedown 是否发生在遮罩层本身：只有「在遮罩上按下、且在遮罩上松开」才算真正点击遮罩关闭，
@@ -41,8 +40,7 @@ export function SettingsModal({ api, open, onClose, onSaved }: Props) {
     setLoading(true)
     Promise.all([
       api.getSettings().catch(() => null),
-      api.getNameList().catch(() => null),
-    ]).then(([s, nl]) => {
+    ]).then(([s]) => {
       if (s) {
         setSettings({
           aiConfig: { ...s.aiConfig },
@@ -55,7 +53,6 @@ export function SettingsModal({ api, open, onClose, onSaved }: Props) {
       } else {
         setStatus('加载设置失败')
       }
-      if (nl) setNameList(nl.names || [])
     }).finally(() => setLoading(false))
   }, [api, open])
 
@@ -251,27 +248,6 @@ export function SettingsModal({ api, open, onClose, onSaved }: Props) {
               </label>
               <div className="form-hint">
                 本机需安装 Python 及 <code>ultralytics</code>、<code>torch</code>、<code>pillow</code>。若未安装或模型不可用，识图会自动回退为整图识别，不影响使用。
-              </div>
-            </div>
-
-            <div className="form-section">
-              <div className="form-title">自动附加的账单文件清单（不可编辑）</div>
-              <div className="name-list-box">
-                {nameList.length === 0 ? (
-                  <span className="name-list-empty">
-                    暂无：请先在左侧选择账单根目录（取每个 Excel 的完整文件名作为清单，~ 开头的临时文件除外）。
-                  </span>
-                ) : (
-                  <>
-                    <span className="name-list-count">共 {nameList.length} 个：</span>
-                    {nameList.map((n) => (
-                      <span className="name-chip" key={n}>{n}</span>
-                    ))}
-                  </>
-                )}
-              </div>
-              <div className="form-hint">
-                系统会遍历账单目录，取每个 Excel 的完整文件名（~ 开头的临时锁文件除外）作为清单，自动附加到上方提示词末尾；AI 识别的客户人名会与清单做模糊匹配（人名可能只是清单项的一部分），并修正为清单中的完整写法。
               </div>
             </div>
 

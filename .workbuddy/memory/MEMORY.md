@@ -32,10 +32,20 @@
 
 ## 识图：检测 vs 内容识别 是两套链路（重要，迁移必看）
 - **小票检测（框出每张票）** 走本地 ONNX 模型：`models/ticket_detect.onnx` + `scripts/detect_onnx.cjs` + `onnxruntime-node`（原生模块，平台相关）。这些文件都在 **app/项目目录内**，随 app 拷贝走，所以换机器**检测通常仍能用**。
-- **内容识别（OCR 出人名/商品/金额）** 走**远程 OpenAI 兼容 chat/completions API**（`src/main/ai-service.ts` 的 `recognizeReceipt`/`recognizeSingleCrop`/`recognizeTicketsWithDetection`）。需要 `settings.aiConfig`（baseURL / apiKey / model / temperature / fastMode），这些配置存在 **electron-store 的 `config.json`**，位于**用户目录、不在 app 包内**：
+- **内容识别（OCR 出人名/商品/金额）** 走**远程 OpenAI 兼容 API**。`src/main/ai-service.ts` 的 `recognizeReceipt` 会根据 `baseURL` 自动路由：以 `/responses` 结尾时走 **Responses API**（适配火山方舟 Ark）；否则走传统 **chat/completions**。`recognizeSingleCrop`/`recognizeTicketsWithDetection` 复用该能力。需要 `settings.aiConfig`（baseURL / apiKey / model / temperature / fastMode），存在 **electron-store 的 `config.json`**，位于**用户目录、不在 app 包内**：
+  - **批量为「整图单次调用」省 token（2026-08-15 晚改）**：`recognizeTicketsWithDetection` 先用本地 ONNX 框出 N 张小票（boxes/crops 供 UI），但识别不再逐张裁剪各调一次，而是把每张小票的边界框（x,y,w,h + 原图尺寸）拼进提示词（`buildDetectPrompt`），**对整图只发 1 次 `recognizeReceipt`（returnRaw:true）**，模型按坐标逐框定位并一次性返回全部小票数组，再映射回 `det.boxes[i]`。相比逐张 N 次调用，省下 N-1 次请求的图片/提示词 token 与往返；代价是整图下小票被统一缩放、单票分辨率略降（pic/1.jpg 20 张实测精度可接受）。`recognizeReceipt` 新增 `opts.returnRaw` 透传原始 {name,date,items} 数组（`doRequest`/`doRequestResponses` 的 ok 返回附带 `parsed`，`normalizeRows` 已 `export`）。**token 实测（pic/1.jpg/20票）：整图单次 4,459 tokens vs 逐张 20 次 38,074 tokens → 逐张是整图 8.5 倍，整图省约 88%**。根因：逐张重复发送 SINGLE_TICKET_PROMPT(~900 tok)×20 + 每张图独立被视觉编码器下采样各占 token 预算；Ark doubao-seed 对大图会内部下采样到固定分辨率，故整图 input 反而很低。
   - macOS：`~/Library/Application Support/bill-explorer/config.json`
   - Windows：`%APPDATA%\bill-explorer\config.json`
   - Linux：`~/.config/bill-explorer/config.json`
 - **「换机器后小票还能框、但内容识别不到」的根因**：app 拷过去了（检测模型在包内），但 `config.json` 没拷（AI 配置在用户目录）→ 新机器 `aiConfig` 为空 → `recognizeReceipt` 的 `isValidConfig` 为 false → 返回 `{error, message:'AI 接口未配置：请在设置中填写…'}`。
 - **迁移修复**：① 在新机器设置里重填 AI 配置（最稳）；② 或把旧机器 `config.json` 复制到新机器同路径后重启（注意 `workDir` 等路径在新机器可能要重选）。若填好仍失败，看识图窗口状态栏报错：`请求 AI 接口失败/超时`=网络或 key 被 IP 白名单拦；`HTTP 4xx`= key/model 错。
 
+
+- **内容识别（识图第二条链路）推荐模型（2026-08-15 结论）**：场景=中文手写小票+看图+结构化抽取(JSON)。硬约束：必须支持 vision、OpenAI 兼容 chat/completions、中文手写 OCR 强、稳定输出 JSON。
+  - **首选：阿里云百炼 Qwen-VL（`qwen-vl-max-latest` 或带日期的快照如 `qwen-vl-max-0919`）**：官方定位即「多语言文字+手写体识别」「发票/表单/表格结构化输出」，与本项目小票场景 100% 吻合；国内节点低延迟；原生 OpenAI 兼容，`ai-service.ts` 已对百炼做 `enable_thinking:false` 兼容（fastMode 关思考提速省 token）。baseURL=`https://dashscope.aliyuncs.com/compatible-mode/v1`，约 ¥0.02/千tokens。
+  - **次选（快+便宜）：Gemini 2.5 Flash / 2.0 Flash**（OpenRouter 或 Google OpenAI 兼容接口），手写 OCR 强、极速极省，国内直连需代理。
+  - **最高精度不计成本：GPT-5.5 / GPT-4o**（OpenAI 官方 OpenAI 兼容），通用强但中文手写略逊 Qwen、价高。
+  - **高吞吐低成本：豆包 vision / 智谱 GLM-4V / Qwen-VL 小模型**（国内、便宜，量大适用）。
+  - **设置要点**：temperature 用低值（代码默认 0.2，OCR 要稳定）；fastMode 保持开启（尤其 Qwen3/推理模型）；单票 crop 已压到 1280px 省 token；每张小票一次调用、并发 3，量大时优先选便宜且够准的模型而非最贵旗舰；纯文本模型即使 OpenAI 兼容也不能用（无 vision）。
+  - **当前项目默认接入（2026-08-15 晚更新）**：火山方舟 Responses API + `doubao-seed-evolving`。该模型默认开启深度思考，Ark Responses API 必须显式传 `thinking: { type: 'disabled' }` 才能直出 JSON；`ai-service.ts` 已在 fastMode=true（默认）时自动设置。
+  - **识别结果缓存（2026-08-15 收尾）**：所有视觉 AI 调用经 `recognizeReceipt` 唯一入口，已加内容级缓存 `src/main/recogCache.ts`（内存 Map + 磁盘 `userData/recog-cache`，key=图片内容sha256 + 模型/提示词指纹，不含 apiKey）。命中则跳过 HTTP 请求；换模型/改提示词/图片内容变化才失效。`force` 贯穿可主动重识别；UI 有「清除识别缓存」按钮（IPC `clear-recog-cache`）。即「同一张图只请求一次，重开复用缓存」。

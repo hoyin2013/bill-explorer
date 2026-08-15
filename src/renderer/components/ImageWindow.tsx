@@ -171,10 +171,11 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
   // tickets 的实时镜像（供异步队列读取最新裁剪图 / 已识别结果，避免闭包读到旧值）
   const ticketsRef = useRef<RecognizedTicket[]>([])
   // 后台识别队列管理器：queue=待处理下标，running=是否有循环在跑，cancelled=取消
-  const recogMgr = useRef<{ queue: number[]; running: boolean; cancelled: boolean }>({
+  const recogMgr = useRef<{ queue: number[]; running: boolean; cancelled: boolean; force: Set<number> }>({
     queue: [],
     running: false,
     cancelled: false,
+    force: new Set<number>(),
   })
   // 单张小票图片点击放大：全屏查看（lightbox）
   const [lightbox, setLightbox] = useState(false)
@@ -843,14 +844,16 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
 
   // 把若干小票加入后台识别队列（去重：已识别 / 已在队列中的跳过）。
   // front=true 表示优先识别（如用户刚点击的那张）。全部顺序处理，不阻塞前台操作。
-  function enqueueRecognition(indices: number[], front = false) {
+  function enqueueRecognition(indices: number[], front = false, force = false) {
     if (!ticketsRef.current.length) return
     const toAdd: number[] = []
     for (const i of indices) {
       const hasRows = (ticketsRef.current[i]?.rows.length ?? 0) > 0
-      if (hasRows) continue
+      // 已识别过的小票默认跳过（命中缓存）；仅当用户主动「重新识别此张」(force) 时才重新入队
+      if (hasRows && !force) continue
       if (recogMgr.current.queue.includes(i)) continue
       toAdd.push(i)
+      if (force) recogMgr.current.force.add(i)
     }
     if (toAdd.length === 0) return
     setRecogState((p) => {
@@ -875,13 +878,15 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
     let processed = 0
     while (mgr.queue.length > 0 && !mgr.cancelled) {
       const i = mgr.queue.shift()!
-      // 再次确认：若已被识别（例如用户刚手动识别过 / 已缓存），直接跳过
-      if ((ticketsRef.current[i]?.rows.length ?? 0) > 0) {
+      const force = mgr.force.has(i)
+      mgr.force.delete(i)
+      // 再次确认：若已被识别（例如用户刚手动识别过 / 已缓存），且非主动重新识别，直接跳过
+      if ((ticketsRef.current[i]?.rows.length ?? 0) > 0 && !force) {
         setRecogState((p) => ({ ...p, [i]: 'done' }))
         continue
       }
       setStatus(`正在后台识别第 ${i + 1} 张小票…（队列剩余 ${mgr.queue.length} 张）`)
-      await recognizeTicketByIdx(i)
+      await recognizeTicketByIdx(i, force)
       processed++
     }
     mgr.running = false
@@ -903,7 +908,7 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
   // 核心：识别第 i 张小票（前台 / 后台共用）。
   // 日期规则：仅「首张被识别」的小票贡献日期作为全局基准；之后所有小票的日期都套用
   // 该基准（不各自再识别日期），保证一整组小票使用同一日期。
-  async function recognizeTicketByIdx(i: number) {
+  async function recognizeTicketByIdx(i: number, force = false) {
     const t = ticketsRef.current[i]
     if (!t || !t.crop) {
       setRecogState((p) => ({ ...p, [i]: 'error' }))
@@ -912,7 +917,7 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
     }
     setRecogState((p) => ({ ...p, [i]: 'busy' }))
     try {
-      const res = await api.aiRecognizeCrop(t.crop)
+      const res = await api.aiRecognizeCrop(t.crop, force)
       if (res.error) {
         setStatus(res.message || `第 ${i + 1} 张识别失败`)
         setRecogState((p) => ({ ...p, [i]: 'error' }))
@@ -935,15 +940,18 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
         return next
       })
       setRecogState((p) => ({ ...p, [i]: 'done' }))
+      if (res.cached) setStatus(`第 ${i + 1} 张：命中识别缓存，已跳过请求（如需重识别请点「重新识别此张」）`)
     } catch (err) {
       setStatus('识别失败：' + (err instanceof Error ? err.message : '未知错误'))
       setRecogState((p) => ({ ...p, [i]: 'error' }))
     }
   }
 
-  // 逐张识别：对检测出来但还没识别的小票，调用 AI 识别这一张裁剪图（前台手动触发，走队列）
+  // 逐张识别：对检测出来但还没识别的小票，调用 AI 识别这一张裁剪图（前台手动触发，走队列）。
+  // 若该张已识别过，则带着 force=true 入队，忽略缓存、重新请求模型（按钮显示「重新识别此张」）。
   function recognizeThisCrop(i: number) {
-    enqueueRecognition([i], true)
+    const force = (ticketsRef.current[i]?.rows.length ?? 0) > 0
+    enqueueRecognition([i], true, force)
   }
 
   // 复制文本到剪贴板
@@ -1396,6 +1404,17 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
                     title="先旋转到正向，再点此：用训练好的 YOLOv8 模型（ONNX 运行时）把每张小票框出来并裁剪。点框可放大，再点「识别此张」读文字"
                   >
                     {aiLoading ? '检测中…' : '检测小票（画框）'}
+                  </button>
+                  <button
+                    className="btn btn-outline"
+                    onClick={async () => {
+                      const r = await api.clearRecogCache()
+                      setStatus(r.error ? '清除识别缓存失败：' + r.error : `已清除识别缓存（${r.cleared} 条），下次打开图片将重新请求 AI`)
+                    }}
+                    disabled={aiLoading}
+                    title="删除本地识别结果缓存，使所有图片下次打开时重新请求 AI 识别（换模型/改提示词会自动失效，通常无需手动清除）"
+                  >
+                    清除识别缓存
                   </button>
                   {bgRunning && (
                     <div className="bg-indicator" title="正在后台顺序识别各张小票，不阻塞前台；可取消">

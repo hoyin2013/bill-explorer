@@ -4,7 +4,8 @@ import { join, basename } from 'path'
 import { scanDirectory, openFile, revealFile } from './file-service'
 import { appendRows, previewRows, updateRows, loadSheet, saveSheet, listBackups, restoreBackup } from './excel-memo'
 import { listImages, readImageBase64 } from './image-service'
-import { recognizeReceipt, DEFAULT_PROMPT, AIConfig, AIRecognizedRow, buildNameList, buildAugmentedPrompt, correctPersonNames, recognizeTicketsWithDetection, recognizeSingleCrop, type RecognizedTicket } from './ai-service'
+import { recognizeReceipt, DEFAULT_PROMPT, AIConfig, AIRecognizedRow, buildNameList, correctPersonNames, recognizeTicketsWithDetection, recognizeSingleCrop, type RecognizedTicket } from './ai-service'
+import { clearRecogCache } from './recogCache'
 import { getDefaultModelPath, detectTickets, detectEnvironment } from './detection'
 import type { ImageSnapshot } from '../renderer/types'
 
@@ -28,6 +29,10 @@ interface AppSettings {
 // 历史记录最多保留条数
 const HISTORY_LIMIT = 50
 
+// 默认 AI 接入：火山方舟（Volcano Engine Ark）Responses API + 豆包视觉模型，默认关闭思考（fastMode）。
+const DEFAULT_ARK_BASE_URL = 'https://ark.cn-beijing.volces.com/api/v3/responses'
+const DEFAULT_ARK_MODEL = 'doubao-seed-evolving'
+
 // 持久化配置存储：工作目录 + 最近修改历史 + AI/图片设置
 const store = new Store<{
   workDir?: string
@@ -50,9 +55,9 @@ const store = new Store<{
           type: 'object',
           default: {},
           properties: {
-            baseURL: { type: 'string', default: '' },
+            baseURL: { type: 'string', default: DEFAULT_ARK_BASE_URL },
             apiKey: { type: 'string', default: '' },
-            model: { type: 'string', default: 'gpt-4o-mini' },
+            model: { type: 'string', default: DEFAULT_ARK_MODEL },
             temperature: { type: 'number', default: 0.2 },
             fastMode: { type: 'boolean', default: true },
           },
@@ -95,9 +100,9 @@ function getSettings(): AppSettings {
   if (prompt.includes('你是一位票据录入助手') || prompt.includes('识别不到则置 null')) prompt = DEFAULT_PROMPT
   return {
     aiConfig: {
-      baseURL: raw.aiConfig?.baseURL || '',
+      baseURL: raw.aiConfig?.baseURL || DEFAULT_ARK_BASE_URL,
       apiKey: raw.aiConfig?.apiKey || '',
-      model: raw.aiConfig?.model || 'gpt-4o-mini',
+      model: raw.aiConfig?.model || DEFAULT_ARK_MODEL,
       temperature: typeof raw.aiConfig?.temperature === 'number' ? raw.aiConfig.temperature : 0.2,
       fastMode: raw.aiConfig?.fastMode !== false,
     },
@@ -114,9 +119,9 @@ function saveSettings(patch: AppSettings): void {
   const next: AppSettings = {
     aiConfig: patch.aiConfig
       ? {
-          baseURL: patch.aiConfig.baseURL?.trim() || current.aiConfig?.baseURL || '',
+          baseURL: patch.aiConfig.baseURL?.trim() || current.aiConfig?.baseURL || DEFAULT_ARK_BASE_URL,
           apiKey: patch.aiConfig.apiKey || current.aiConfig?.apiKey || '',
-          model: patch.aiConfig.model?.trim() || current.aiConfig?.model || 'gpt-4o-mini',
+          model: patch.aiConfig.model?.trim() || current.aiConfig?.model || DEFAULT_ARK_MODEL,
           temperature: typeof patch.aiConfig.temperature === 'number'
             ? patch.aiConfig.temperature
             : current.aiConfig?.temperature ?? 0.2,
@@ -483,15 +488,15 @@ ipcMain.handle('set-image-rotation', (_event, angle: number) => {
 })
 
 // ============ IPC 通道：AI 识别小票 ============
-ipcMain.handle('ai-recognize', async (_event, imagePath: string) => {
+ipcMain.handle('ai-recognize', async (_event, imagePath: string, force?: boolean) => {
   const settings = getSettings()
   // 遍历账单目录，取每个 Excel 的完整文件名作为清单（~ 开头的临时文件已由 scanDirectory 过滤）
   const nameList = await buildNameList(store.get('workDir') || '')
   const base = await readImageBase64(imagePath)
   if (base.error) return base
-  // 把文件名清单附加到提示词之后，让 AI 在已知范围内识别并做模糊匹配
-  const prompt = buildAugmentedPrompt(settings.prompt, nameList)
-  const res = await recognizeReceipt(base.base64 || '', settings.aiConfig || { baseURL: '', apiKey: '', model: '', temperature: 0.2 }, prompt)
+  // 不再把文件名清单塞进提示词（省 token）；识别结果交由 correctPersonNames 用相似度匹配修正
+  const prompt = settings.prompt
+  const res = await recognizeReceipt(base.base64 || '', settings.aiConfig || { baseURL: '', apiKey: '', model: '', temperature: 0.2 }, prompt, { force })
   // 识别完成后，把人名模糊匹配并修正为清单中的完整文件名写法
   if (res.rows && res.rows.length) {
     const { rows, corrected } = correctPersonNames(res.rows, nameList)
@@ -540,6 +545,17 @@ ipcMain.handle('ai-detect', async (_event, payload: { imagePath?: string; imageB
   }
 })
 
+// ============ IPC 通道：清除识别结果缓存（userData/recog-cache） ============
+// 缓存按「图片内容 + 模型/提示词」命中；换模型/改提示词会自动失效，但用户想强制全部重识别时用它。
+ipcMain.handle('clear-recog-cache', async () => {
+  try {
+    const cleared = clearRecogCache()
+    return { cleared }
+  } catch (err) {
+    return { cleared: 0, error: err instanceof Error ? err.message : '清除失败' }
+  }
+})
+
 // ============ IPC 通道：探测检测增强的运行环境（Python / ultralytics / 模型是否就绪） ============
 // 供识图窗口提前给出提示，而不是让用户点「检测」后才慢悠悠地失败。
 ipcMain.handle('detect-environment', async () => {
@@ -548,7 +564,7 @@ ipcMain.handle('detect-environment', async () => {
 })
 
 // ============ IPC 通道：仅识别单张裁剪小票（用于「先框出、再逐张识别」流程） ============
-ipcMain.handle('ai-recognize-crop', async (_event, cropBase64: string) => {
+ipcMain.handle('ai-recognize-crop', async (_event, cropBase64: string, force?: boolean) => {
   const settings = getSettings()
   const nameList = await buildNameList(store.get('workDir') || '')
   try {
@@ -557,6 +573,7 @@ ipcMain.handle('ai-recognize-crop', async (_event, cropBase64: string) => {
       settings.aiConfig || { baseURL: '', apiKey: '', model: '', temperature: 0.2 },
       settings.prompt,
       nameList,
+      { force },
     )
     return res
   } catch (err) {
@@ -565,7 +582,7 @@ ipcMain.handle('ai-recognize-crop', async (_event, cropBase64: string) => {
 })
 
 // ============ IPC 通道：检测增强识别（YOLOv8 框出小票 → 逐张裁剪 → AI 识别人名与内容） ============
-ipcMain.handle('ai-recognize-detected', async (_event, payload: { imagePath?: string; imageBase64?: string }) => {
+ipcMain.handle('ai-recognize-detected', async (_event, payload: { imagePath?: string; imageBase64?: string; force?: boolean }) => {
   const settings = getSettings()
   const nameList = await buildNameList(store.get('workDir') || '')
   const modelPath = settings.detectModel && settings.detectModel.trim() ? settings.detectModel.trim() : getDefaultModelPath()
@@ -577,18 +594,12 @@ ipcMain.handle('ai-recognize-detected', async (_event, payload: { imagePath?: st
       settings.aiConfig || { baseURL: '', apiKey: '', model: '', temperature: 0.2 },
       settings.prompt,
       nameList,
-      { modelPath, pythonPath, enableDetect, imageBase64: payload.imageBase64 },
+      { modelPath, pythonPath, enableDetect, imageBase64: payload.imageBase64, force: payload.force },
     )
     return res
   } catch (err) {
     return { error: true, message: err instanceof Error ? err.message : '检测增强识别失败', detected: false }
   }
-})
-
-// ============ IPC 通道：获取当前账单目录的人名清单（供设置界面展示） ============
-ipcMain.handle('get-name-list', async () => {
-  const list = await buildNameList(store.get('workDir') || '')
-  return { names: list }
 })
 
 // 读取某 Excel 已自动填入过的图片列表（去重用）

@@ -201,10 +201,8 @@ export interface ElectronAPI {
   getImageRotation: () => Promise<number>
   // 保存全局默认图片旋转角（自动保存用户设定的方向）
   setImageRotation: (angle: number) => Promise<void>
-  // 获取当前账单目录的人名清单（从文件名提取）
-  getNameList: () => Promise<{ names: string[] }>
   // AI 识别小票
-  aiRecognize: (imagePath: string) => Promise<{
+  aiRecognize: (imagePath: string, force?: boolean) => Promise<{
     error?: boolean
     message?: string
     rows?: AIRecognizedRow[]
@@ -222,7 +220,7 @@ export interface ElectronAPI {
   }>
   // 检测增强识别：YOLOv8 框出小票 → 逐张裁剪 → AI 识别（返回识别结果 + 框坐标 + 逐张小票）。
   // 可传 imageBase64（前端已旋转/缩放后的图），否则用 imagePath 读原图。
-  aiRecognizeDetected: (payload: { imagePath?: string; imageBase64?: string }) => Promise<{
+  aiRecognizeDetected: (payload: { imagePath?: string; imageBase64?: string; force?: boolean }) => Promise<{
     error?: boolean
     message?: string
     rows?: AIRecognizedRow[]
@@ -232,13 +230,18 @@ export interface ElectronAPI {
     detected?: boolean
     modelAvailable?: boolean
     tickets?: RecognizedTicket[]
+    cached?: boolean
   }>
   // 仅识别单张裁剪小票（crop 为 base64 jpeg），用于「先框出、再逐张识别」流程
-  aiRecognizeCrop: (cropBase64: string) => Promise<{
+  // force=true 时忽略识别缓存，重新请求 AI（用于主动「重新识别」）
+  aiRecognizeCrop: (cropBase64: string, force?: boolean) => Promise<{
     error?: boolean
     message?: string
     rows?: AIRecognizedRow[]
+    cached?: boolean
   }>
+  // 清除识别结果缓存（userData/recog-cache）
+  clearRecogCache: () => Promise<{ cleared: number; error?: string }>
   // 读取某 Excel 已自动填入过的图片列表（去重用）
   getApplied: (filePath: string) => Promise<string[]>
   // 记录某张图片已自动填入

@@ -1,0 +1,35 @@
+{
+  "image": {
+    "whole_px": 24470208,
+    "crop_px_sum": 20128232,
+    "crop_px_ratio": 0.823,
+    "crop_count": 20
+  },
+  "whole_image_single_call": {
+    "input_tokens": 2672,
+    "output_tokens": 1787,
+    "total_tokens": 4459,
+    "input_tokens_details": {
+      "cached_tokens": 0
+    },
+    "output_tokens_details": {
+      "reasoning_tokens": 0
+    },
+    "ms": 25517,
+    "calls": 1
+  },
+  "per_crop_20_calls": {
+    "input_tokens": 37158,
+    "output_tokens": 916,
+    "total_tokens": 38074,
+    "calls": 20,
+    "failed": 0
+  },
+  "comparison": {
+    "whole_total_tokens": 4459,
+    "percrop_total_tokens": 38074,
+    "percrop_total_minus_whole": 33615,
+    "percrop_is_x_times_whole": 8.54,
+    "whole_saves_tokens_vs_percrop": 33615
+  }
+}
