@@ -1272,7 +1272,7 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
                     <span>本张识别信息（{activeTicket.rows.length} 条，可直接修改）</span>
                     <div className="ai-result-actions">
                       <button
-                        className="btn btn-small btn-primary"
+                        className="btn btn-small btn-outline"
                         disabled={!activeTicket.rows.length}
                         onClick={() => copyText(rowsToTsv(activeTicket.rows), `已复制第 ${active + 1} 张的 ${activeTicket.rows.length} 条记录`)}
                       >
