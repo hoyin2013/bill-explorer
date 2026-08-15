@@ -384,9 +384,17 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
+  flex-wrap: wrap;
+  gap: 8px 10px;
   padding-bottom: 8px;
   border-bottom: 1px solid #ebeef5;
+}
+.memo-file {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 .memo-file-name {
   color: #303133;
@@ -399,6 +407,7 @@ body {
 .memo-header-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 6px;
 }
 .btn-close { color: #909399; background: #f5f7fa; border: 1px solid #e4e7ed; }
@@ -776,13 +785,8 @@ body {
   position: relative;
   z-index: 2;
 }
-/* A4 十字高亮：当前行/列淡蓝底，便于定位光标（优先级低于 entry-row / row-selected） */
-.row-active td {
-  background: rgba(64, 158, 255, 0.06);
-}
-.col-active {
-  background: rgba(64, 158, 255, 0.06);
-}
+/* 与 Excel 一致：只有选区（.cell-range）本身填充蓝色，不染整行/整列（避免误以为未选中的数据被选中）。
+   激活单元格仅保留 .td-active 的蓝色描边用于定位。故此处不再为 .row-active / .col-active 设底色。 */
 /* A1 记忆补全下拉建议 */
 .suggest-menu {
   position: fixed;

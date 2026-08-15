@@ -1469,12 +1469,6 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
     )
   }
 
-  // 存在多选区域（矩形框选或整行选择）时，不再显示"整行/整列"高亮带，
-  // 只保留选区本身与活动格边框——与 Excel 一致，避免误以为整行被选中
-  const bandOff =
-    (!!selRange && (selRange.r1 !== selRange.r2 || selRange.c1 !== selRange.c2)) ||
-    selRows.size > 0
-
   return (
     <div className="sheet-panel">
       <div className="memo-header">
@@ -1567,7 +1561,6 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
                 key={r}
                 className={
                   (r === entryRow ? 'entry-row' : '') +
-                  (r === active.r && !bandOff ? ' row-active' : '') +
                   (selRows.has(r) ? ' row-selected' : '') +
                   (autoRows.has(r) ? ' row-auto' : '') +
                   (fill && r >= Math.min(fill.startR, fill.endR) && r <= Math.max(fill.startR, fill.endR)
@@ -1612,7 +1605,7 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
                       key={c}
                       data-r={r}
                       data-c={c}
-                      className={isActive ? 'td-active' : c === active.c && !bandOff ? 'col-active' : ''}
+                      className={isActive ? 'td-active' : ''}
                       ref={isActive ? activeTdRef : undefined}
                       onContextMenu={(e) => openMenu(e, r, c)}
                     >
