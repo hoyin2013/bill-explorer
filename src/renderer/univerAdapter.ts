@@ -16,8 +16,8 @@ const DATE_STYLE = 'bill-date'
 // Excel / Univer 日期序列号纪元：1899-12-30（与 ExcelJS 一致，2026 年这类远期日期无 1900 闰年 bug 干扰）
 const EXCEL_EPOCH = Date.UTC(1899, 11, 30)
 
-// 数字保留最多 2 位小数并去掉无意义尾随 0
-function fmtNum(n: number): string {
+// 数字保留最多 2 位小数并去掉无意义尾随 0（金额=数量*单价 复用）
+export function fmtNum(n: number): string {
   if (!isFinite(n)) return ''
   const r = Math.round(n * 100) / 100
   return String(r)
@@ -149,25 +149,31 @@ export function rowsToWorkbookData(rows: string[][]): Partial<IWorkbookData> {
 }
 
 // Univer IWorkbookData → string[][]（纯数据行；首行表头被剥离）
+// 关键：Univer 的 cellData 是**稀疏**的——完全没有单元格的空行不会出现在 cellData 里。
+// 若只遍历已存在的行，用户有意留的间隔空行（如按月用 2 空行分隔）会在保存时丢失。
+// 故按「最大存在行号」重建连续行数组：区间内缺失的行补成全空行，
+// 交给 saveSheet 后由其 \u200b 占位逻辑把"数据区内的空行"写进 xlsx，round-trip 不丢。
 export function workbookDataToRows(wb: IWorkbookData): string[][] {
   const sheet = wb.sheets ? wb.sheets[SHEET_ID] ?? Object.values(wb.sheets)[0] : undefined
   const cd = sheet?.cellData as unknown as Record<number, Record<number, { v?: unknown }>> | undefined
   if (!cd) return []
-  const rowKeys = Object.keys(cd)
-    .map(Number)
-    .sort((a, b) => a - b)
+  let maxRow = 0
   let maxC = COL_COUNT - 1
-  for (const r of rowKeys) {
+  for (const k of Object.keys(cd)) {
+    const r = Number(k)
+    if (r > maxRow) maxRow = r
     const rowObj = cd[r] || {}
     for (const c of Object.keys(rowObj)) {
       const ci = Number(c)
       if (ci > maxC) maxC = ci
     }
   }
+  // 列数不超过固定 9 列，避免个别异常单元格把矩阵撑宽
+  if (maxC > COL_COUNT - 1) maxC = COL_COUNT - 1
   const out: string[][] = []
-  for (const r of rowKeys) {
-    if (r === 0) continue // 跳过表头行
-    const rowObj = cd[r] || {}
+  // 行号从 1 开始（0 是表头），到 maxRow 为止，区间内缺失行补全空行
+  for (let r = 1; r <= maxRow; r++) {
+    const rowObj = (cd[r] || {}) as Record<number, { v?: unknown }>
     const arr: string[] = []
     for (let c = 0; c <= maxC; c++) {
       const cell = rowObj[c]
