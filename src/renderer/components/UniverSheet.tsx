@@ -25,7 +25,11 @@ interface Props {
 // 渲染层而静默/抛错失败（光标数据层已跳到目标行，视图却停在原地）。
 // 所以用 `sheet.command.scroll-view` 显式滚动（按行索引，走 SheetScrollManagerService，
 // 不依赖缺失的 SheetsScrollRenderController），并做重试：render 一就绪即滚动成功。
-function setActiveAndScroll(univerAPI: UniverAPI, row: number, col: number) {
+// 打开 / 填入后「末尾多留几行可见」：滚动时把视口顶行设为「激活行 - leadRows」，
+// 这样末尾几行真实数据仍留在视野里，而续填的空行（激活行）在下方依旧可见。
+const END_VISIBLE_LEAD = 8
+
+function setActiveAndScroll(univerAPI: UniverAPI, row: number, col: number, leadRows = 0) {
   const active = univerAPI.getActiveSheet()
   if (!active) return
   const ws = active.worksheet
@@ -37,7 +41,8 @@ function setActiveAndScroll(univerAPI: UniverAPI, row: number, col: number) {
   const api = univerAPI as unknown as {
     executeCommand: (id: string, params?: object) => Promise<unknown> | unknown
   }
-  const params = { sheetViewStartRow: row, sheetViewStartColumn: col, offsetX: 0, offsetY: 0 }
+  const scrollRow = Math.max(1, row - leadRows)
+  const params = { sheetViewStartRow: scrollRow, sheetViewStartColumn: col, offsetX: 0, offsetY: 0 }
   const tryScroll = (attempt: number) => {
     try {
       Promise.resolve(api.executeCommand('sheet.command.scroll-view', params)).then((ok) => {
@@ -148,9 +153,10 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
         }
         const data = rowsToWorkbookData(res.rows)
         univerAPI.createWorkbook(data)
-        // 激活单元格落在数据末尾空行，便于继续录入 / 默认「填入」位置；并滚动到该行
+        // 激活单元格落在数据末尾空行，便于继续录入 / 默认「填入」位置；
+        // 并滚动到该行，同时多留末尾几行真实数据在视野内（END_VISIBLE_LEAD）
         const r = Math.max(1, Math.min(res.rows.length + 1, 100000))
-        setActiveAndScroll(univerAPI, r, 0)
+        setActiveAndScroll(univerAPI, r, 0, END_VISIBLE_LEAD)
       } catch (e) {
         if (!disposed) setStatus('打开失败：' + (e instanceof Error ? e.message : '未知错误'))
       }
@@ -188,8 +194,8 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
       const matrix = list.map(mapRecognizedToRow)
       try {
         ws.getRange(startRow, 0, matrix.length, COL_COUNT).setValues(matrix)
-        // 推进激活格到填入内容之后的空行，并滚动到该位置（让光标始终可见）
-        setActiveAndScroll(univerAPI, startRow + matrix.length, 0)
+        // 推进激活格到填入内容之后的空行，并滚动到该位置（让光标与刚填的内容都可见）
+        setActiveAndScroll(univerAPI, startRow + matrix.length, 0, 3)
       } catch (e) {
         setStatus('填入失败：' + (e instanceof Error ? e.message : '未知错误'))
         return
