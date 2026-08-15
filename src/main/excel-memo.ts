@@ -699,7 +699,8 @@ export async function saveSheet(
       // Excel 打开时自动计算并缓存结果；本应用再读回时 cellToText 仍识别为公式，保持活公式。
       if (raw.startsWith('=')) {
         cell.value = { formula: raw.slice(1) }
-        if (f.key === 'amount' || f.key === 'qty') cell.numFmt = '#,##0'
+        // 金额/数量列若旧文件残留逗号格式，统一改回 General（与编辑界面一致，不显示千分位逗号）
+        if (f.key === 'amount' || f.key === 'qty') cell.numFmt = 'General'
         return
       }
       if (f.key === 'date') {
@@ -710,14 +711,12 @@ export async function saveSheet(
         } else {
           cell.value = raw
         }
-      } else if (f.key === 'qty' || f.key === 'price') {
+      } else if (f.key === 'qty' || f.key === 'price' || f.key === 'amount') {
+        // 数量/单价/金额：纯数字存为数字；统一使用 General 格式（无千分位逗号），
+        // 与 Univer 编辑界面显示保持一致（输入界面 1000、Excel 也 1000，不再出现 1,000）。
         const n = Number(raw)
         cell.value = isNaN(n) ? raw : n
-        if (f.key !== 'price') cell.numFmt = '#,##0'
-      } else if (f.key === 'amount') {
-        const n = Number(raw)
-        cell.value = isNaN(n) ? raw : n
-        cell.numFmt = '#,##0'
+        cell.numFmt = 'General'
       } else {
         cell.value = raw
       }

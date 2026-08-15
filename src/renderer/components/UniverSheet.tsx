@@ -71,8 +71,10 @@ function setActiveAndScroll(
 }
 
 // 数量(列4,Excel=E)/单价(列5,Excel=F)变化 → 金额(列6,Excel=G) 写入「数量×单价」的结果。
-// 仅当金额列为空/0/非数字时才自动计算，避免覆盖用户手填的金额。
-// 直接写入计算后的静态数值（而非 =E*F 活公式）：不依赖 Univer 公式引擎是否计算，
+// 对账单模型，金额恒等于 数量×单价：只要数量与单价都为正，就实时把金额算出来（覆盖写入）。
+// 这样插入新行/复制行/修改数量单价时，金额都自动生效，不会因“金额已是正数”被守卫跳过而失效。
+// 仅当数量或单价缺失（为空/0）时才不动金额列——方便“无数量单价的行手填一个独立金额”（如整单总价）。
+// 直接写计算后的静态数值（而非 =E*F 活公式）：不依赖 Univer 公式引擎是否计算，
 // 保证金额在编辑框里始终正确显示，彻底避免“公式未被计算而显示 0”的问题。
 function recomputeAmount(
   ws: { getRange: (r: number, c: number) => { getValue: () => unknown; setValue: (v: number | string) => void } },
@@ -81,12 +83,7 @@ function recomputeAmount(
   const q = Number(ws.getRange(row, 4).getValue() ?? 0)
   const p = Number(ws.getRange(row, 5).getValue() ?? 0)
   if (q > 0 && p > 0) {
-    const cur = ws.getRange(row, 6).getValue()
-    const curNum = Number(cur ?? 0)
-    // 金额列已有合理数值（用户手填）则不覆盖；否则写入数量×单价的计算结果
-    if (cur == null || cur === '' || isNaN(curNum) || curNum <= 0) {
-      ws.getRange(row, 6).setValue(q * p)
-    }
+    ws.getRange(row, 6).setValue(q * p)
   }
 }
 
