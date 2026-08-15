@@ -10,6 +10,11 @@ import { dialog } from 'electron'
 // 直接把程序卡死。超过此阈值即视为“异常超大”，直接拒绝打开并弹窗提示（不读取数据）。
 const SAFE_MAX_ROWS = 100_000
 
+// 末尾空行裁剪阈值：仅当文件末尾「连续空行数量超过此值（即“大量空行”）」时才删除，
+// 以便光标能定位到真正数据的末尾；数据区内部的空行（夹在两条有数据行之间）一律保留，不删。
+// 这样既能保留原文件排版（用户有意留的分隔空行不丢），又不会因末尾堆积成百上千空行而难以定位。
+const TRAILING_EMPTY_TRIM_THRESHOLD = 100
+
 // ============ 版本备份：保存前自动备份，便于“恢复上一个版本” ============
 // 备份放在与文件同级的隐藏目录 `.billbackups` 下；扫描器跳过 `.` 前缀目录，不会被当成文件列出。
 const BACKUP_DIR_NAME = '.billbackups'
@@ -457,6 +462,15 @@ function cellToText(value: unknown): string {
     // 公式单元格：优先返回公式本体（ExcelJS 存为 { formula, result }，formula 不含 `=`）。
     // 这样打开含公式的文件后，金额等列仍以“活公式”形式回到 Univer / 落盘，而不是变成静态数值。
     if ('formula' in v && typeof v.formula === 'string' && v.formula.trim() !== '') {
+      // 优先返回「公式计算结果」：在 Excel 里金额等列显示的是公式算出的结果，而非公式本身。
+      // 打开文件时若直接返回公式串，Univer 会按自己的上下文重新计算；一旦公式引用与 Excel 不一致
+      // （如引用了空单元格、或数量/单价被当成文本相乘），就会算出 0，于是出现
+      // “原文件金额明明有数据，但编辑框里显示 0” 的现象。
+      // 因此优先采用 Excel 缓存的计算结果，保证编辑框里看到的值与 Excel 完全一致；
+      // 仅当没有缓存结果（极少数情况）时才退回公式本体，交由 Univer 继续计算。
+      if ('result' in v && v.result !== undefined && v.result !== null && String(v.result).trim() !== '') {
+        return cellToText(v.result)
+      }
       return '=' + v.formula
     }
     if ('result' in v && v.result !== undefined && v.result !== null) {
@@ -540,28 +554,44 @@ export async function loadSheet(filePath: string): Promise<SheetData> {
   const headerMatched = HEADER.some((f) => findColByLabel(headerRow, f.label) !== 0)
   const dataStart = headerMatched ? 2 : 1
 
-  // 单次遍历读取数据：用 eachRow 只迭代「有值」的行（自动跳过尾部 / 中间的空行），
-  // 一边读一边记录最后一行有数据的位置，省去原来「自底向上扫描找末行 + 自顶向下再读一遍」两遍遍历。
-  // 对末尾存在大量空行的不规范文件，原写法要 O(rowCount × 9) 逐个单元格判断，
-  // 现在 eachRow 对空行只做一次 hasValues 判空，几乎零成本，打开速度显著提升。
-  // 数据区内空行的不可见占位符（与 saveSheet 对应）
+  // 读取数据：用 eachRow 稀疏遍历「有值或有样式」的行（快，几乎不碰空白行），
+  // 把每个被访问行的内容记进 seen；同时记录最大行号 lastRow。
+  // 之后按 [dataStart, lastRow] 连续重建行数组：区间内未被 eachRow 访问的行
+  // （如用户有意在两条数据之间留的空行——它们既无值也无样式，eachRow 不会访问到）
+  // 补成全空行，从而「保留原文件排版、空行不丢」，编辑框里能看到与 Excel 一致的空行。
+  // 仅当文件「末尾连续空行超过阈值」时才裁剪，避免末尾堆积大量空行使光标难以定位到真正末尾。
+  // 注：saveSheet 用 \u200b 占位写入的空行，eachRow 会访问到（有值），这里还原为真正的空行。
   const PLACEHOLDER = '\u200b'
-  const rows: string[][] = []
-  let lastDataRow = dataStart - 1
+  const seen = new Map<number, string[]>()
+  let lastRow = dataStart - 1
   ws.eachRow((row, rowNumber) => {
     if (rowNumber < dataStart) return // 跳过表头行
     const arr: string[] = []
     HEADER.forEach((f) => {
       arr.push(cellToText(row.getCell(colMap[f.key]).value))
     })
-    // 整行无任何非空白内容（例如仅残留格式/旧空格的行）→ 跳过，避免生成空行/脏行
-    if (arr.every((t) => t.trim() === '')) return
-    // 整行仅由占位符构成（数据区空行被 saveSheet 用 \u00a0 占位）→ 还原为真正的空行，
-    // 使网格里表现为用户有意留的空行（且仍是“全空”语义，不影响导出/统计）。
+    // 整行仅由占位符构成（数据区空行被 saveSheet 用 \u200b 占位）→ 还原为真正的空行，
+    // 使网格里表现为用户有意留的空行（仍是“全空”语义，不影响导出/统计）。
     const onlyPlaceholder = arr.every((t) => t === PLACEHOLDER || t.trim() === '')
-    rows.push(onlyPlaceholder ? HEADER.map(() => '') : arr)
-    lastDataRow = rowNumber
+    seen.set(rowNumber, onlyPlaceholder ? HEADER.map(() => '') : arr)
+    if (rowNumber > lastRow) lastRow = rowNumber
   })
+
+  const rows: string[][] = []
+  for (let r = dataStart; r <= lastRow; r += 1) {
+    rows.push(seen.get(r) ?? HEADER.map(() => ''))
+  }
+
+  // 末尾“大量空行”裁剪：自底向上数连续空行，仅当其数量超过阈值时才删除，
+  // 以便光标定位到真正数据的末尾；数据区内部的空行（夹在两条有数据行之间）一律保留。
+  let trailingEmpty = 0
+  for (let i = rows.length - 1; i >= 0; i -= 1) {
+    if (rows[i].every((c) => !String(c).trim())) trailingEmpty += 1
+    else break
+  }
+  if (trailingEmpty > TRAILING_EMPTY_TRIM_THRESHOLD) {
+    rows.length = rows.length - trailingEmpty
+  }
 
   return { sheetName: ws.name || '', headerLabels, rows }
 }
@@ -592,10 +622,16 @@ export async function saveSheet(
     return { error: true, message: '文件写权限不足。' }
   }
 
-  // 剥离尾部全空行（调用方一般已处理，这里再兜底一次）
+  // 兜底裁剪尾部空行：仅当「末尾连续空行超过阈值（大量空行）」时才删，
+  // 保留用户有意留的少量末尾空行，与 loadSheet 的裁剪口径一致，避免误删原格式。
   const rows = rowsIn.map((r) => r.map((c) => (c == null ? '' : String(c))))
-  while (rows.length && rows[rows.length - 1].every((c) => !c.trim())) {
-    rows.pop()
+  let trailingEmpty = 0
+  for (let i = rows.length - 1; i >= 0; i -= 1) {
+    if (rows[i].every((c) => !String(c).trim())) trailingEmpty += 1
+    else break
+  }
+  if (trailingEmpty > TRAILING_EMPTY_TRIM_THRESHOLD) {
+    rows.length = rows.length - trailingEmpty
   }
 
   let workbook: ExcelJS.Workbook
@@ -639,16 +675,16 @@ export async function saveSheet(
   })
 
   // 逐行写回，按列类型处理（日期/数字/文本）。
-  // 对“数据区内”的全空行写入不可见占位符（不间断空格 \u00a0）：
+  // 对“数据区内”的全空行写入不可见占位符（\u200b）：
   // ExcelJS 不会把“所有单元格为空”的行写入文件，导致用户有意留的空行在保存后丢失；
   // 用占位符让该行被写入，loadSheet 读回时再还原为真正的空行。
   rows.forEach((arr, i) => {
     const row = ws.getRow(startRow + i)
     const isEmpty = !arr.some((c) => String(c).trim() !== '')
     if (isEmpty) {
+      row.values = [] // 先清空（避免残留旧数据）
       if (i <= lastContent) {
-        row.values = [] // 先清空（避免残留旧数据），再写占位
-        row.getCell(1).value = '\u200b'
+        row.getCell(1).value = '\u200b' // 数据区内空行用占位写入，使其被 Excel 保留
       }
       return
     }

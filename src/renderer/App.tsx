@@ -307,6 +307,10 @@ function AppInner({ api }: { api: ElectronAPI }) {
     setQuery('') // 关闭录入面板即清空左侧文件搜索框，避免残留检索词
     setMemoStatus('')
     lastSavedFile.current = null
+    // 关闭后把焦点交还左侧搜索框：编辑表格时 Univer 的隐藏编辑器可能
+    // 仍抢占焦点，导致搜索框“卡住无法输入”；显式聚焦保证其可用，
+    // 也符合“正常关闭后焦点定位到搜索框”的预期行为。
+    requestAnimationFrame(() => searchRef.current?.focus())
   }
 
   // ---- 点击历史记录：若在当前扫描结果中则打开录入，否则用系统程序打开 ----

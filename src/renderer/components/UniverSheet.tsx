@@ -70,12 +70,12 @@ function setActiveAndScroll(
   else tryScroll(0)
 }
 
-// 数量(列4,Excel=E)/单价(列5,Excel=F)变化 → 金额(列6,Excel=G) 写成公式 =E*F（活公式，改数量/单价自动重算）。
-// 仅当金额列为空/0/非数字时才写公式，避免覆盖用户手填的金额。
-// 注意 row 为 Univer 的 0 基行号；数据首行是 Univer 行 1、对应 Excel 行 2，
-// 故公式里引用的 Excel 行号 = row + 1。
+// 数量(列4,Excel=E)/单价(列5,Excel=F)变化 → 金额(列6,Excel=G) 写入「数量×单价」的结果。
+// 仅当金额列为空/0/非数字时才自动计算，避免覆盖用户手填的金额。
+// 直接写入计算后的静态数值（而非 =E*F 活公式）：不依赖 Univer 公式引擎是否计算，
+// 保证金额在编辑框里始终正确显示，彻底避免“公式未被计算而显示 0”的问题。
 function recomputeAmount(
-  ws: { getRange: (r: number, c: number) => { getValue: () => unknown; setValue: (v: string) => void } },
+  ws: { getRange: (r: number, c: number) => { getValue: () => unknown; setValue: (v: number | string) => void } },
   row: number,
 ) {
   const q = Number(ws.getRange(row, 4).getValue() ?? 0)
@@ -83,10 +83,9 @@ function recomputeAmount(
   if (q > 0 && p > 0) {
     const cur = ws.getRange(row, 6).getValue()
     const curNum = Number(cur ?? 0)
-    // 金额列已有合理数值（用户手填，包括此前写好的公式算出的结果）则不覆盖；否则写入活公式
+    // 金额列已有合理数值（用户手填）则不覆盖；否则写入数量×单价的计算结果
     if (cur == null || cur === '' || isNaN(curNum) || curNum <= 0) {
-      const excelRow = row + 1
-      ws.getRange(row, 6).setValue(`=E${excelRow}*F${excelRow}`)
+      ws.getRange(row, 6).setValue(q * p)
     }
   }
 }
@@ -224,6 +223,21 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
       }
       try {
         univerAPI.dispose()
+      } catch {
+        /* noop */
+      }
+      // 兜底清理：编辑单元格时 Univer 的 DOCS 单元格编辑器
+      // （div#univer-doc-selection-container-* 内的 contentEditable[data-u-comp='editor']）
+      // 会抢走键盘焦点，且可能被 reparent 到 document.body 上、dispose 未同步移除。
+      // 若残留，这个隐藏输入框会持续“吞掉”键盘事件，导致关闭表格后
+      // 左侧搜索框“卡住、无法输入”。这里强制移除残留容器并释放其焦点。
+      try {
+        const editors = document.querySelectorAll("div[id^='univer-doc-selection-container-']")
+        editors.forEach((el) => {
+          const ed = el.querySelector("[data-u-comp='editor']") as HTMLElement | null
+          if (ed && document.activeElement === ed) ed.blur()
+          el.remove()
+        })
       } catch {
         /* noop */
       }
