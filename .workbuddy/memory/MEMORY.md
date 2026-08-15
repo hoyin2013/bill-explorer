@@ -15,6 +15,16 @@
 - 固定 9 列账单表头：序号/日期/货品名称/单位/数量/单价/金额/调货人/备注（`HEADER` 常量）。
 - 保存前自动备份到同级 `.billbackups/`（最多 5 份，时间戳精确到毫秒）。
 
+## 表格渲染引擎：Univer 混合接入（2026-08-15 起的架构）
+- **渲染进程改用 Univer（Canvas 虚拟化表格）** 替代自研 `SheetGrid`，彻底解决 3000+ 行卡顿。文件读写仍由 **ExcelJS** 负责（保留日期UTC、空行占位、大文件拦截、自动备份全部约定），Univer 只做渲染+编辑。
+- **关键文件**：`src/renderer/univerAdapter.ts`（`string[][]` ↔ Univer `IWorkbookData` 互转 + OCR 记录→9列映射）、`src/renderer/components/UniverSheet.tsx`（挂载 Univer、灌数据/取回、OCR 填入、保存/恢复）、`App.tsx` 用 `UniverSheet` 替换 `SheetGrid`。
+- **数据流**：打开 `api.loadSheet`→`rowsToWorkbookData`→`createWorkbook`；保存 `getSnapshot`→`workbookDataToRows`→去尾空行→`api.saveSheet`。首行作为表头（保存时剥离，由 saveSheet 重写）。
+- **OCR「填入到激活行」**：`UniverSheet` 监听 `apply-recognized-rows`，取 `getActiveRange().getRow()` 为起始行，从首列 `setValues` 写入并推进激活格。
+- **Univer 原生替代了原自研逻辑**：矩形框选、复制/粘贴、拖拽填充序列（序号1/2/3）、单元格编辑、滚动虚拟化——无需再维护。`SheetGrid.tsx` 已不再被引用（保留文件备查）。
+- **弃用「建议框」（拼音补全）**，待后续按需补回（Univer 有数据验证下拉可作临时替代）。
+- 依赖 `@univerjs/presets` + `@univerjs/preset-sheets-core` @0.25.1；`vite.config.ts` 已 `resolve.dedupe:['react','react-dom']`。
+- **CSS 铁律（踩过坑，勿犯）**：`.univer-container` 的撑满规则**必须**写成精确选择器 `.univer-container > div[data-u-comp='workbench-layout']`，**绝不能用 `.univer-container > div` 通配**。Univer 会往同一容器插入两个 `position:fixed` 的隐藏输入法/选区容器 `div#univer-doc-selection-container-*`（DOCS_NORMAL = 单元格编辑器，DOCS_FORMULA_BAR = 编辑栏），通配规则的 `width/height:100%` 对 fixed 元素解析为**整个视口**，加上它 `activate()` 时会置 `z-index:1000`，就变成一层全屏透明遮罩，把顶栏/侧栏/表头按钮全部锁死（只有 Univer 编辑区还能用），且**只有点过单元格之后才复现**（未交互时它被推到视口外 -998,-896）。因此 index.css 常驻兜底规则：`div[id^='univer-doc-selection-container-'] { position:absolute !important; width:0 !important; height:0 !important }`（absolute 同时修正 IME 候选框位置，因为 Univer 内部按「相对父容器」算 left/top）；另给 `.app-top`/`.app-side`/`.memo-header` 加 `z-index:1001`（>Univer 1000，<Univer 弹层 1020）作二重保险。
+
 ## 识图：检测 vs 内容识别 是两套链路（重要，迁移必看）
 - **小票检测（框出每张票）** 走本地 ONNX 模型：`models/ticket_detect.onnx` + `scripts/detect_onnx.cjs` + `onnxruntime-node`（原生模块，平台相关）。这些文件都在 **app/项目目录内**，随 app 拷贝走，所以换机器**检测通常仍能用**。
 - **内容识别（OCR 出人名/商品/金额）** 走**远程 OpenAI 兼容 chat/completions API**（`src/main/ai-service.ts` 的 `recognizeReceipt`/`recognizeSingleCrop`/`recognizeTicketsWithDetection`）。需要 `settings.aiConfig`（baseURL / apiKey / model / temperature / fastMode），这些配置存在 **electron-store 的 `config.json`**，位于**用户目录、不在 app 包内**：

@@ -3,7 +3,7 @@ import { ElectronAPI, FileEntry, HistoryRecord, ImageSnapshot } from './types'
 import { filterFiles } from './utils'
 import { DirectoryBar } from './components/DirectoryBar'
 import { ResultList } from './components/ResultList'
-import { SheetGrid } from './components/SheetGrid'
+import { UniverSheet } from './components/UniverSheet'
 import { ImageWindow, type ImageWindowHandle } from './components/ImageWindow'
 import { ErrorMessage } from './components/ErrorMessage'
 import { HistoryList } from './components/HistoryList'
@@ -498,7 +498,7 @@ function AppInner({ api }: { api: ElectronAPI }) {
 
         <main className="app-main">
           {activeFile ? (
-            <SheetGrid
+            <UniverSheet
               key={activeFile.filePath}
               file={activeFile}
               api={api}

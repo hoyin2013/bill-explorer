@@ -20,6 +20,8 @@
     "start": "vite --host"
   },
   "dependencies": {
+    "@univerjs/preset-sheets-core": "^0.25.1",
+    "@univerjs/presets": "^0.25.1",
     "electron-store": "^8.2.0",
     "exceljs": "^4.4.0",
     "heic-convert": "^2.1.0",

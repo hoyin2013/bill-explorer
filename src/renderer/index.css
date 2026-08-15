@@ -27,6 +27,9 @@ body {
   display: flex;
   align-items: center;
   gap: 16px;
+  /* 兜底：Univer 内部会插入 z-index:1000 的隐藏层，抬高本区避免被压住点不动 */
+  position: relative;
+  z-index: 1001;
 }
 
 .app-title {
@@ -93,6 +96,9 @@ body {
   flex-direction: column;
   gap: 10px;
   min-width: 0;
+  /* 兜底：同 .app-top，保证左侧文件列表始终可点 */
+  position: relative;
+  z-index: 1001;
 }
 
 .app-main {
@@ -388,6 +394,9 @@ body {
   gap: 8px 10px;
   padding-bottom: 8px;
   border-bottom: 1px solid #ebeef5;
+  /* 兜底：保证「保存 / Excel 打开 / 恢复 / 关闭」始终在 Univer 隐藏层之上 */
+  position: relative;
+  z-index: 1001;
 }
 .memo-file {
   flex: 1 1 auto;
@@ -2058,6 +2067,43 @@ body {
   transition: transform 0.2s;
   box-shadow: 0 2px 16px rgba(0, 0, 0, 0.6);
   cursor: zoom-out;
+}
+
+/* ---- Univer 表格（替代自研 SheetGrid）---- */
+.univer-sheet {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.univer-container {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  position: relative;
+}
+/* Univer 挂载后「工作台根节点」需撑满容器。
+   注意：这里必须精确命中 workbench-layout，绝不能写成 `.univer-container > div`。
+   Univer 会往同一个容器里插入两个隐藏的「文本选区/输入法容器」
+   （div#univer-doc-selection-container-*，position:fixed + z-index:1000），
+   一旦被 width/height:100% 命中，fixed 元素的 100% 会解析成整个视口大小，
+   变成 1400x872 的透明层压在全应用之上 —— 表现为「打开文档后点了单元格，
+   顶栏、AI 设置、小票识图、关闭按钮、左侧文件列表全部点不动，只有编辑区能用」。 */
+.univer-container > div[data-u-comp='workbench-layout'] {
+  width: 100%;
+  height: 100%;
+}
+
+/* Univer 单元格编辑器 / 编辑栏的隐藏输入法容器：
+   1) 强制零尺寸 —— 不再拦截任何鼠标事件（它内部真正需要的只是 1x1 的隐藏 contenteditable）
+   2) 改为 absolute —— Univer 内部用 `left -= 父容器rect.left` 计算位置，
+      本就是按「相对父容器」算的，配合 .univer-container 的 position:relative 才对齐，
+      这样中文输入法候选框也能落在光标处而不是偏移到窗口外。 */
+div[id^='univer-doc-selection-container-'] {
+  position: absolute !important;
+  width: 0 !important;
+  height: 0 !important;
 }
 
 

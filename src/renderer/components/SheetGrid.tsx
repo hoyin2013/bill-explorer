@@ -1,4 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type React from 'react'
+import type { RefObject } from 'react'
 import { FileEntry, ElectronAPI, AIRecognizedRow } from '../types'
 
 /* 固定 9 列（列数不动，就这么多列），type 决定编辑控件与写回格式 */
@@ -135,6 +137,223 @@ interface Props {
   onClose: () => void
   onSaved: () => void
 }
+
+/* ===================== 性能优化：行 / 单元格 / 编辑器 memo 组件 ===================== */
+/* 3000+ 行时整表内联渲染，会让每次输入触发 ~27000 个单元格重渲染而卡死。
+   抽成 memo 后，只有数据 / 激活 / 选中发生变化的行与单元格才重渲染；commitCell
+   等也只复制被改动的单行引用，其余行 props 浅相等被跳过。 */
+
+type SuggestState = { r: number; c: number; items: string[]; hi: number; rect: { left: number; top: number; width: number } | null } | null
+
+interface GridHandlers {
+  onCellMouseDown: (e: React.MouseEvent, r: number, c: number) => void
+  handleCellClick: (r: number, c: number) => void
+  startEdit: (r: number, c: number) => void
+  openMenu: (e: React.MouseEvent, r: number, c: number) => void
+  onFillHandleDown: (e: React.MouseEvent) => void
+  onRowNumMouseDown: (e: React.MouseEvent, r: number) => void
+  onRowNumClick: (r: number, e: React.MouseEvent) => void
+  openRowMenu: (e: React.MouseEvent, r: number) => void
+  loaded: boolean
+}
+
+interface EditorProps {
+  editRef: RefObject<HTMLTextAreaElement | HTMLInputElement | null>
+  commit: (r: number, c: number, v: string) => void
+  move: (dir: 'down' | 'up' | 'left' | 'right') => void
+  updateSuggest: (r: number, c: number, v: string) => void
+  acceptSuggest: (r: number, c: number, item: string, dir?: 'down' | 'left' | 'right') => void
+  setEditing: (b: boolean) => void
+  focusContainer: () => void
+  setSuggest: React.Dispatch<React.SetStateAction<SuggestState>>
+  suggest: SuggestState
+}
+
+function CellEditor(p: EditorProps & { r: number; c: number; value: string }) {
+  const { r, c, value, editRef, commit, move, updateSuggest, acceptSuggest, setEditing, focusContainer, setSuggest, suggest } = p
+  const common = {
+    ref: editRef as React.Ref<HTMLTextAreaElement>,
+    className: 'cell-editor',
+    style: { width: '100%' },
+
+    onKeyDown: (e: React.KeyboardEvent) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault()
+        move('down')
+      } else if (e.key === 'Tab') {
+        e.preventDefault()
+        move(e.shiftKey ? 'left' : 'right')
+      } else if (e.key === 'Escape') {
+        e.preventDefault()
+        setEditing(false)
+        focusContainer()
+      }
+    },
+    onBlur: () => setEditing(false),
+  }
+  const rows = Math.min(6, Math.max(1, value.split('\n').length))
+  const open = suggest && suggest.r === r && suggest.c === c && suggest.items.length > 0
+  return (
+    <textarea
+      {...common}
+      rows={rows}
+      value={value}
+      onChange={(e) => {
+        commit(r, c, e.target.value)
+        updateSuggest(r, c, e.target.value)
+      }}
+      onKeyDown={(e) => {
+        if (open) {
+          if (e.key === 'ArrowDown') {
+            e.preventDefault()
+            setSuggest({ ...suggest!, hi: (suggest!.hi + 1) % suggest!.items.length })
+            return
+          }
+          if (e.key === 'ArrowUp') {
+            e.preventDefault()
+            setSuggest({ ...suggest!, hi: (suggest!.hi - 1 + suggest!.items.length) % suggest!.items.length })
+            return
+          }
+          if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault()
+            acceptSuggest(r, c, suggest!.items[suggest!.hi], 'down')
+            return
+          }
+          if (e.key === 'Tab') {
+            e.preventDefault()
+            acceptSuggest(r, c, suggest!.items[suggest!.hi], e.shiftKey ? 'left' : 'right')
+            return
+          }
+          if (e.key === 'Escape') {
+            e.preventDefault()
+            setSuggest(null)
+            return
+          }
+        }
+        common.onKeyDown(e)
+      }}
+    />
+  )
+}
+
+interface CellViewProps {
+  r: number
+  c: number
+  val: string
+  isActive: boolean
+  isEdit: boolean
+  inSel: boolean
+  typeNum: boolean
+  handlers: GridHandlers
+  activeTdRef: RefObject<HTMLTableCellElement | null>
+  editor: EditorProps | undefined
+}
+const CellView = memo(function CellView(p: CellViewProps) {
+  const { r, c, val, isActive, isEdit, inSel, typeNum, handlers, activeTdRef, editor } = p
+  const cls =
+    'cell' +
+    (typeNum ? ' cell-num' : '') +
+    (isActive ? ' cell-active' : '') +
+    (inSel ? ' cell-range' : '')
+  if (isEdit && editor) {
+    return (
+      <td
+        className={isActive ? 'td-active' : ''}
+        ref={isActive ? (activeTdRef as React.Ref<HTMLTableDataCellElement>) : undefined}
+        onContextMenu={(e) => handlers.openMenu(e, r, c)}
+      >
+        <CellEditor {...editor} r={r} c={c} value={val} />
+      </td>
+    )
+  }
+  return (
+    <td
+      data-r={r}
+      data-c={c}
+      className={isActive ? 'td-active' : ''}
+      ref={isActive ? (activeTdRef as React.Ref<HTMLTableDataCellElement>) : undefined}
+      onContextMenu={(e) => handlers.openMenu(e, r, c)}
+    >
+      <div
+        className={cls}
+        title={val ? val : undefined}
+        onMouseDown={(e) => handlers.onCellMouseDown(e, r, c)}
+        onClick={() => handlers.handleCellClick(r, c)}
+        onDoubleClick={() => handlers.startEdit(r, c)}
+      >
+        {val}
+      </div>
+      {handlers.loaded && isActive && c === noIdx && (
+        <div
+          className="fill-handle"
+          title="拖动向下填充序号序列（1,2,3…）"
+          onMouseDown={handlers.onFillHandleDown}
+        />
+      )}
+    </td>
+  )
+})
+
+interface RowViewProps {
+  r: number
+  row: string[]
+  activeC: number
+  editing: boolean
+  selected: boolean
+  fillActive: boolean
+  autoRow: boolean
+  entryRow: number
+  selRange: { r1: number; c1: number; r2: number; c2: number } | null
+  handlers: GridHandlers
+  activeTdRef: RefObject<HTMLTableCellElement | null>
+  editor: EditorProps | undefined
+}
+const RowView = memo(function RowView(p: RowViewProps) {
+  const { r, row, activeC, editing, selected, fillActive, autoRow, entryRow, selRange, handlers, activeTdRef, editor } = p
+  const inSelRow = selRange
+    ? r >= Math.min(selRange.r1, selRange.r2) && r <= Math.max(selRange.r1, selRange.r2)
+    : false
+  const cls =
+    (r === entryRow ? 'entry-row' : '') +
+    (selected ? ' row-selected' : '') +
+    (autoRow ? ' row-auto' : '') +
+    (fillActive ? ' fill-range' : '')
+  return (
+    <tr className={cls}>
+      <td
+        className="rownum"
+        title="点击选中整行（Ctrl 多选 / Shift 连选）；按住拖动可连选多行"
+        onMouseDown={(e) => handlers.onRowNumMouseDown(e, r)}
+        onClick={(e) => handlers.onRowNumClick(r, e)}
+        onContextMenu={(e) => handlers.openRowMenu(e, r)}
+      >
+        {r + 1}
+      </td>
+      {row.map((val, c) => {
+        const isActive = activeC === c
+        const inSel =
+          inSelRow && selRange
+            ? c >= Math.min(selRange.c1, selRange.c2) && c <= Math.max(selRange.c1, selRange.c2)
+            : false
+        return (
+          <CellView
+            key={c}
+            r={r}
+            c={c}
+            val={val}
+            isActive={isActive}
+            isEdit={isActive && editing}
+            inSel={inSel}
+            typeNum={COLUMNS[c].type === 'number'}
+            handlers={handlers}
+            activeTdRef={activeTdRef}
+            editor={isActive && editing ? editor : undefined}
+          />
+        )
+      })}
+    </tr>
+  )
+})
 
 export function SheetGrid({ file, api, onClose, onSaved }: Props) {
   const [grid, setGrid] = useState<string[][]>([])
@@ -386,24 +605,27 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
       lastCommitKeyRef.current = key
     }
     setGrid((prev) => {
-      const next = prev.map((row) => row.slice())
-      if (!next[r]) next[r] = emptyRow()
+      // 精准更新：只复制被改动的单行引用，其余行引用不变，
+      // 配合 RowView/CellView 的 memo，避免整表 ~27000 单元格重渲染
+      const row = (prev[r] || emptyRow()).slice()
       // A3 新行预填：首次在该空行录入时，把"从上一行带过来的默认值"合并进来（只此一次）
-      if (rowDefaultsRef.current.has(r) && isRowEmpty(next[r])) {
+      if (rowDefaultsRef.current.has(r) && isRowEmpty(row)) {
         const seed = rowDefaultsRef.current.get(r)!
         COLUMNS.forEach((col, i) => {
-          if (SEED_FIELDS.has(col.field) && seed[i]) next[r][i] = seed[i]
+          if (SEED_FIELDS.has(col.field) && seed[i]) row[i] = seed[i]
         })
         rowDefaultsRef.current.delete(r)
       }
-      next[r][c] = value
+      row[c] = value
       const f = COLUMNS[c].field
       // 数量/单价变化时自动重算金额（两者都有值时）
       if (f === 'qty' || f === 'price') {
-        const q = Number(next[r][qtyIdx] || 0)
-        const p = Number(next[r][priceIdx] || 0)
-        if (q > 0 && p > 0) next[r][amountIdx] = fmtNum(q * p)
+        const q = Number(row[qtyIdx] || 0)
+        const p = Number(row[priceIdx] || 0)
+        if (q > 0 && p > 0) row[amountIdx] = fmtNum(q * p)
       }
+      const next = prev.slice()
+      next[r] = row
       return next
     })
     setDirty(true)
@@ -420,8 +642,11 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
     pushUndo()
     lastCommitKeyRef.current = null
     setGrid((prev) => {
-      const next = prev.map((row) => row.slice())
-      if (next[r]) next[r][c] = ''
+      if (!prev[r]) return prev
+      const row = prev[r].slice()
+      row[c] = ''
+      const next = prev.slice()
+      next[r] = row
       return next
     })
     setDirty(true)
@@ -1107,6 +1332,17 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
     setMenu({ x: Math.max(4, x), y: Math.max(4, y), r, c })
   }, [])
 
+  // 行号列右键：未选中则先单选本行，再弹菜单（与单元格右键一致）
+  const openRowMenu = useCallback((e: React.MouseEvent, r: number) => {
+    if (!selRowsRef.current.has(r)) {
+      const s = new Set<number>([r])
+      selRowsRef.current = s
+      setSelRows(s)
+      rowAnchorRef.current = r
+    }
+    openMenu(e, r, 0)
+  }, [openMenu])
+
   // 点击别处 / 滚动 / Esc 关闭菜单
   useEffect(() => {
     if (!menu) return
@@ -1434,74 +1670,32 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
   }, 0)
   const entryRow = loaded ? inputRow : -1
 
-  function renderEditor(r: number, c: number, val: string) {
-    const col = COLUMNS[c]
-    const common = {
-      ref: editRef as React.Ref<HTMLTextAreaElement & HTMLInputElement>,
-      className: 'cell-editor',
-      style: { width: '100%' },
-      onKeyDown: (e: React.KeyboardEvent) => {
-        if (e.key === 'Enter' && !e.shiftKey) {
-          e.preventDefault()
-          moveEdit('down')
-        } else if (e.key === 'Tab') {
-          e.preventDefault()
-          moveEdit(e.shiftKey ? 'left' : 'right')
-        } else if (e.key === 'Escape') {
-          e.preventDefault()
-          setEditing(false)
-          focusContainer()
-        }
-      },
-      onBlur: () => setEditing(false),
-    }
-    const rows = Math.min(6, Math.max(1, val.split('\n').length))
-    return (
-      <textarea
-        {...common}
-        rows={rows}
-        value={val}
-        onChange={(e) => {
-          commitCell(r, c, e.target.value)
-          updateSuggest(r, c, e.target.value)
-        }}
-        onKeyDown={(e) => {
-          // 建议框打开时，方向键/回车/Tab/Esc 优先操作建议，而非移动光标
-          if (suggest && suggest.r === r && suggest.c === c && suggest.items.length > 0) {
-            if (e.key === 'ArrowDown') {
-              e.preventDefault()
-              setSuggest({ ...suggest, hi: (suggest.hi + 1) % suggest.items.length })
-              return
-            }
-            if (e.key === 'ArrowUp') {
-              e.preventDefault()
-              setSuggest({
-                ...suggest,
-                hi: (suggest.hi - 1 + suggest.items.length) % suggest.items.length,
-              })
-              return
-            }
-            if (e.key === 'Enter' && !e.shiftKey) {
-              e.preventDefault()
-              acceptSuggest(r, c, suggest.items[suggest.hi], 'down')
-              return
-            }
-            if (e.key === 'Tab') {
-              e.preventDefault()
-              acceptSuggest(r, c, suggest.items[suggest.hi], e.shiftKey ? 'left' : 'right')
-              return
-            }
-            if (e.key === 'Escape') {
-              e.preventDefault()
-              setSuggest(null)
-              return
-            }
-          }
-          common.onKeyDown(e)
-        }}
-      />
-    )
-  }
+  // 传给 memo 行/单元格的稳定回调集合（loaded 仅在打开时变一次，故 handlers 引用基本稳定，
+  // 不会因普通输入而破坏 memo 的浅比较）
+  const handlers = useMemo<GridHandlers>(
+    () => ({
+      onCellMouseDown,
+      handleCellClick,
+      startEdit,
+      openMenu,
+      onFillHandleDown,
+      onRowNumMouseDown,
+      onRowNumClick,
+      openRowMenu,
+      loaded,
+    }),
+    [
+      onCellMouseDown,
+      handleCellClick,
+      startEdit,
+      openMenu,
+      onFillHandleDown,
+      onRowNumMouseDown,
+      onRowNumClick,
+      openRowMenu,
+      loaded,
+    ],
+  )
 
   return (
     <div className="sheet-panel">
@@ -1590,88 +1784,51 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
             </tr>
           </thead>
           <tbody>
-            {grid.map((row, r) => (
-              <tr
-                key={r}
-                className={
-                  (r === entryRow ? 'entry-row' : '') +
-                  (selRows.has(r) ? ' row-selected' : '') +
-                  (autoRows.has(r) ? ' row-auto' : '') +
-                  (fill && r >= Math.min(fill.startR, fill.endR) && r <= Math.max(fill.startR, fill.endR)
-                    ? ' fill-range'
-                    : '')
-                }
-              >
-                <td
-                  className="rownum"
-                  title="点击选中整行（Ctrl 多选 / Shift 连选）；按住拖动可连选多行"
-                  onMouseDown={(e) => onRowNumMouseDown(e, r)}
-                  onClick={(e) => onRowNumClick(r, e)}
-                  onContextMenu={(e) => {
-                    if (!selRowsRef.current.has(r)) {
-                      const s = new Set([r])
-                      selRowsRef.current = s // 同步给 openMenu 立即可见，否则会被它当成"未选中"清掉
-                      setSelRows(s)
-                      rowAnchorRef.current = r
-                    }
-                    openMenu(e, r, 0)
-                  }}
-                >
-                  {r + 1}
-                </td>
-                {row.map((val, c) => {
-                  const isActive = active.r === r && active.c === c
-                  const isEdit = isActive && editing
-                  const sr = selRange
-                  const inSel = sr
-                    ? r >= Math.min(sr.r1, sr.r2) &&
-                      r <= Math.max(sr.r1, sr.r2) &&
-                      c >= Math.min(sr.c1, sr.c2) &&
-                      c <= Math.max(sr.c1, sr.c2)
-                    : false
-                  const cls =
-                    'cell' +
-                    (COLUMNS[c].type === 'number' ? ' cell-num' : '') +
-                    (isActive ? ' cell-active' : '') +
-                    (inSel ? ' cell-range' : '')
-                  return (
-                    <td
-                      key={c}
-                      data-r={r}
-                      data-c={c}
-                      className={isActive ? 'td-active' : ''}
-                      ref={isActive ? activeTdRef : undefined}
-                      onContextMenu={(e) => openMenu(e, r, c)}
-                    >
-                      {isEdit ? (
-                        renderEditor(r, c, val)
-                      ) : (
-                        <>
-                          <div
-                            className={cls}
-                            title={val ? val : undefined}
-                            onMouseDown={(e) => onCellMouseDown(e, r, c)}
-                            onClick={() => handleCellClick(r, c)}
-                            onDoubleClick={() => {
-                              startEdit(r, c)
-                            }}
-                          >
-                            {val}
-                          </div>
-                          {loaded && isActive && c === noIdx && (
-                            <div
-                              className="fill-handle"
-                              title="拖动向下填充序号序列（1,2,3…）"
-                              onMouseDown={onFillHandleDown}
-                            />
-                          )}
-                        </>
-                      )}
-                    </td>
-                  )
-                })}
-              </tr>
-            ))}
+            {grid.map((row, r) => {
+              const isActiveRow = active.r === r
+              const editingRow = isActiveRow && editing
+              const selRangeForRow =
+                selRange &&
+                r >= Math.min(selRange.r1, selRange.r2) &&
+                r <= Math.max(selRange.r1, selRange.r2)
+                  ? selRange
+                  : null
+              return (
+                <RowView
+                  key={r}
+                  r={r}
+                  row={row}
+                  activeC={isActiveRow ? active.c : -1}
+                  editing={editingRow}
+                  selected={selRows.has(r)}
+                  fillActive={
+                    !!fill &&
+                    r >= Math.min(fill.startR, fill.endR) &&
+                    r <= Math.max(fill.startR, fill.endR)
+                  }
+                  autoRow={autoRows.has(r)}
+                  entryRow={entryRow}
+                  selRange={selRangeForRow}
+                  handlers={handlers}
+                  activeTdRef={activeTdRef}
+                  editor={
+                    editingRow
+                      ? {
+                          editRef,
+                          commit: commitCell,
+                          move: moveEdit,
+                          updateSuggest,
+                          acceptSuggest,
+                          setEditing,
+                          focusContainer,
+                          setSuggest,
+                          suggest,
+                        }
+                      : undefined
+                  }
+                />
+              )
+            })}
           </tbody>
         </table>
       </div>

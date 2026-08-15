@@ -10,6 +10,8 @@ export default defineConfig({
     alias: {
       '@': resolve(__dirname, './src/renderer'),
     },
+    // Univer 自带 React 运行时，与主工程 React 去重，避免「两个 React 实例」导致 hooks/事件失效
+    dedupe: ['react', 'react-dom'],
   },
   server: {
     port: 5173,
