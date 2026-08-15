@@ -170,7 +170,17 @@ export function rowsToWorkbookData(rows: string[][]): Partial<IWorkbookData> {
     cellData: cellData as unknown as IWorksheetData['cellData'],
     // 列级默认样式：第 2 列（0 基索引 1）整体按 yyyy-mm-dd 显示，
     // 新输入/粘贴的日期也会套用该格式，不会变成数字。
-    columnData: { 1: { s: DATE_STYLE } },
+    columnData: {
+      1: { s: DATE_STYLE },
+      // 短内容列默认列宽调小（纯元数据，不影响渲染性能），把横向空间让给货品名称等宽列。
+      0: { w: 52 }, // 序号
+      3: { w: 50 }, // 单位
+      4: { w: 50 }, // 数量
+      5: { w: 56 }, // 单价
+      6: { w: 60 }, // 金额
+      7: { w: 56 }, // 调货人
+      8: { w: 90 }, // 备注
+    },
     // 冻结首行（表头）：ySplit=1 固定第 0 行，startRow=1 为可滚动区起点，
     // 滚动时表头始终停留在顶部（xSplit=0 不冻结列）。
     freeze: { xSplit: 0, ySplit: 1, startRow: 1, startColumn: 0 },
