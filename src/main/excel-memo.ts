@@ -454,6 +454,11 @@ function cellToText(value: unknown): string {
   if (value instanceof Date) return fmtDateLocal(value)
   if (typeof value === 'object') {
     const v = value as Record<string, unknown>
+    // 公式单元格：优先返回公式本体（ExcelJS 存为 { formula, result }，formula 不含 `=`）。
+    // 这样打开含公式的文件后，金额等列仍以“活公式”形式回到 Univer / 落盘，而不是变成静态数值。
+    if ('formula' in v && typeof v.formula === 'string' && v.formula.trim() !== '') {
+      return '=' + v.formula
+    }
     if ('result' in v && v.result !== undefined && v.result !== null) {
       return cellToText(v.result)
     }
@@ -652,6 +657,13 @@ export async function saveSheet(
       const raw = arr[ci] != null ? String(arr[ci]) : ''
       if (raw.trim() === '') {
         cell.value = null
+        return
+      }
+      // 公式单元格（如 金额=数量*单价，由 Univer 写入的 =E2*F2）：以 Excel 公式写回，
+      // Excel 打开时自动计算并缓存结果；本应用再读回时 cellToText 仍识别为公式，保持活公式。
+      if (raw.startsWith('=')) {
+        cell.value = { formula: raw.slice(1) }
+        if (f.key === 'amount' || f.key === 'qty') cell.numFmt = '#,##0'
         return
       }
       if (f.key === 'date') {

@@ -8,7 +8,6 @@ import {
   rowsToWorkbookData,
   workbookDataToRows,
   mapRecognizedToRow,
-  fmtNum,
   COL_COUNT,
 } from '../univerAdapter'
 
@@ -71,17 +70,23 @@ function setActiveAndScroll(
   else tryScroll(0)
 }
 
-// 数量(列4)/单价(列5)变化 → 重算金额(列6) = 数量*单价（二者都为正时）。
-// 仅当金额列本身未手动填写时才自动算，避免覆盖用户手填的金额。
-function recomputeAmount(ws: { getRange: (r: number, c: number) => { getValue: () => unknown; setValue: (v: string) => void } }, row: number) {
+// 数量(列4,Excel=E)/单价(列5,Excel=F)变化 → 金额(列6,Excel=G) 写成公式 =E*F（活公式，改数量/单价自动重算）。
+// 仅当金额列为空/0/非数字时才写公式，避免覆盖用户手填的金额。
+// 注意 row 为 Univer 的 0 基行号；数据首行是 Univer 行 1、对应 Excel 行 2，
+// 故公式里引用的 Excel 行号 = row + 1。
+function recomputeAmount(
+  ws: { getRange: (r: number, c: number) => { getValue: () => unknown; setValue: (v: string) => void } },
+  row: number,
+) {
   const q = Number(ws.getRange(row, 4).getValue() ?? 0)
   const p = Number(ws.getRange(row, 5).getValue() ?? 0)
   if (q > 0 && p > 0) {
     const cur = ws.getRange(row, 6).getValue()
     const curNum = Number(cur ?? 0)
-    // 金额列已是合理数值（用户手填）则不覆盖；否则自动填充 数量*单价
+    // 金额列已有合理数值（用户手填，包括此前写好的公式算出的结果）则不覆盖；否则写入活公式
     if (cur == null || cur === '' || isNaN(curNum) || curNum <= 0) {
-      ws.getRange(row, 6).setValue(fmtNum(q * p))
+      const excelRow = row + 1
+      ws.getRange(row, 6).setValue(`=E${excelRow}*F${excelRow}`)
     }
   }
 }
@@ -239,12 +244,15 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
       if (!list.length) return
       const ar = ws.getActiveRange()
       const startRow = ar ? Math.max(1, ar.getRow()) : 1
+      // 数量/单价/金额数值化（写数字而非文本），否则像 =E*F 的公式会因“文本*文本”得到 #VALUE!。
+      // 金额：AI 已识别则保留其数值；否则留空，由下方 SheetValueChanged 监听自动写 =E*F 活公式。
       const matrix = list.map((r) => {
-        const row = mapRecognizedToRow(r)
-        // AI 未给金额但给了数量与单价 → 自动算 金额=数量*单价
+        const row = mapRecognizedToRow(r) as (string | number)[]
         const q = Number(row[4] || 0)
         const p = Number(row[5] || 0)
-        if (!Number(row[6]) && q > 0 && p > 0) row[6] = fmtNum(q * p)
+        row[4] = q > 0 ? q : ''
+        row[5] = p > 0 ? p : ''
+        row[6] = Number(row[6]) > 0 ? Number(row[6]) : ''
         return row
       })
       try {

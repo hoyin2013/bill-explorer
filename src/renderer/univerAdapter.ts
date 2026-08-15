@@ -104,12 +104,25 @@ export function mapRecognizedToRow(r: AIRecognizedRow): string[] {
   ]
 }
 
+// Univer 单元格取值 → 可编辑文本。
+// 关键：金额列(列6)可能是公式单元格（金额=数量*单价）。公式单元格的 `f` 才是“公式本体”，
+// `v` 是计算结果（甚至可能是 #VALUE! 之类的错误）。要保留公式，必须读 `f` 而非 `v`。
+// 故优先返回 `f`（统一补 `=` 前缀），否则才返回 `v`。
+function cellToText(cell: { v?: unknown; f?: unknown } | undefined): string {
+  if (cell && cell.f != null) {
+    const f = String(cell.f)
+    return f.startsWith('=') ? f : '=' + f
+  }
+  if (cell && cell.v != null) return String(cell.v)
+  return ''
+}
+
 // string[][]（纯数据行，不含表头）→ Univer IWorkbookData（首行为表头）
 export function rowsToWorkbookData(rows: string[][]): Partial<IWorkbookData> {
   const all = [HEADER, ...rows]
-  const cellData: Record<number, Record<number, { v: string | number; s?: string }>> = {}
+  const cellData: Record<number, Record<number, { v?: string | number; f?: string; s?: string }>> = {}
   all.forEach((row, r) => {
-    const rowObj: Record<number, { v: string | number; s?: string }> = {}
+    const rowObj: Record<number, { v?: string | number; f?: string; s?: string }> = {}
     for (let c = 0; c < COL_COUNT; c++) {
       const val = row[c] ?? ''
       if (c === 1) {
@@ -122,7 +135,23 @@ export function rowsToWorkbookData(rows: string[][]): Partial<IWorkbookData> {
           continue
         }
       }
-      if (val !== '') rowObj[c] = { v: val }
+      if (val === '') continue // 空值不写，保持稀疏（数据区空行由 saveSheet 用 \u200b 占位保证 round-trip）
+      if (val.startsWith('=')) {
+        // 公式单元格（如 金额=数量*单价）：直接以公式本体写入，Univer 负责计算并显示结果。
+        // Univer 的 `f` 字段即公式字符串（含 `=` 前缀），与读取端 cellToText 对应。
+        rowObj[c] = { f: val }
+        continue
+      }
+      if (c === 4 || c === 5 || c === 6) {
+        // 数量/单价/金额：若为纯数字，存成数字（而非文本）。
+        // 否则像 `=E2*F2` 这样的公式会做“文本*文本”→ #VALUE!。
+        const n = Number(val)
+        if (!isNaN(n) && val.trim() !== '') {
+          rowObj[c] = { v: n }
+          continue
+        }
+      }
+      rowObj[c] = { v: val }
     }
     cellData[r] = rowObj
   })
@@ -173,7 +202,7 @@ export function workbookDataToRows(wb: IWorkbookData): string[][] {
   const out: string[][] = []
   // 行号从 1 开始（0 是表头），到 maxRow 为止，区间内缺失行补全空行
   for (let r = 1; r <= maxRow; r++) {
-    const rowObj = (cd[r] || {}) as Record<number, { v?: unknown }>
+    const rowObj = (cd[r] || {}) as Record<number, { v?: unknown; f?: unknown }>
     const arr: string[] = []
     for (let c = 0; c <= maxC; c++) {
       const cell = rowObj[c]
@@ -181,7 +210,8 @@ export function workbookDataToRows(wb: IWorkbookData): string[][] {
         // 日期列：序列号 → yyyy-mm-dd，文本写法归一化，保证落盘与编辑区一致
         arr.push(normalizeDateValue(cell && cell.v != null ? cell.v : ''))
       } else {
-        arr.push(cell && cell.v != null ? String(cell.v) : '')
+        // 优先读公式 `f`（金额列公式会原样输出 `=E2*F2`）；否则读计算值 `v`
+        arr.push(cellToText(cell))
       }
     }
     out.push(arr)
