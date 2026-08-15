@@ -156,7 +156,9 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
   applyRowsRef.current = applyRecognizedRows
   useEffect(() => {
     const off = api.on('apply-recognized-rows', (rows) => {
-      if (Array.isArray(rows)) applyRowsRef.current(rows as AIRecognizedRow[], true)
+      // 识图窗口点「填入」时，填到主窗口网格里光标当前激活的那一行（而非永远追加到末尾）。
+      // append=false → applyRecognizedRows 以 activeRef.current.r 为起点。
+      if (Array.isArray(rows)) applyRowsRef.current(rows as AIRecognizedRow[], false)
     })
     return off
   }, [api])
@@ -1389,8 +1391,9 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
       return n
     })
     setDirty(true)
-    setInputRow(start)
-    setActive({ r: start, c: 0 })
+    // 光标推进到已填块之后：保证再次点「填入」时落在下一批空行，不会覆盖刚填的内容
+    setInputRow(start + rows.length)
+    setActive({ r: start + rows.length, c: 0 })
     setEditing(true)
     setStatus(`已填入 ${rows.length} 行识别结果（黄色高亮为 AI 预录，修改后自动转白）`)
   }
