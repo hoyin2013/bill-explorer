@@ -14,3 +14,13 @@
 - `loadSheet`/`saveSheet`/`appendMemo`/`updateMemo`/`restoreBackup`/`listBackups` 在 `src/main/excel-memo.ts`，经 `src/main/preload.ts` 暴露为 `window.electronAPI`。
 - 固定 9 列账单表头：序号/日期/货品名称/单位/数量/单价/金额/调货人/备注（`HEADER` 常量）。
 - 保存前自动备份到同级 `.billbackups/`（最多 5 份，时间戳精确到毫秒）。
+
+## 识图：检测 vs 内容识别 是两套链路（重要，迁移必看）
+- **小票检测（框出每张票）** 走本地 ONNX 模型：`models/ticket_detect.onnx` + `scripts/detect_onnx.cjs` + `onnxruntime-node`（原生模块，平台相关）。这些文件都在 **app/项目目录内**，随 app 拷贝走，所以换机器**检测通常仍能用**。
+- **内容识别（OCR 出人名/商品/金额）** 走**远程 OpenAI 兼容 chat/completions API**（`src/main/ai-service.ts` 的 `recognizeReceipt`/`recognizeSingleCrop`/`recognizeTicketsWithDetection`）。需要 `settings.aiConfig`（baseURL / apiKey / model / temperature / fastMode），这些配置存在 **electron-store 的 `config.json`**，位于**用户目录、不在 app 包内**：
+  - macOS：`~/Library/Application Support/bill-explorer/config.json`
+  - Windows：`%APPDATA%\bill-explorer\config.json`
+  - Linux：`~/.config/bill-explorer/config.json`
+- **「换机器后小票还能框、但内容识别不到」的根因**：app 拷过去了（检测模型在包内），但 `config.json` 没拷（AI 配置在用户目录）→ 新机器 `aiConfig` 为空 → `recognizeReceipt` 的 `isValidConfig` 为 false → 返回 `{error, message:'AI 接口未配置：请在设置中填写…'}`。
+- **迁移修复**：① 在新机器设置里重填 AI 配置（最稳）；② 或把旧机器 `config.json` 复制到新机器同路径后重启（注意 `workDir` 等路径在新机器可能要重选）。若填好仍失败，看识图窗口状态栏报错：`请求 AI 接口失败/超时`=网络或 key 被 IP 白名单拦；`HTTP 4xx`= key/model 错。
+
