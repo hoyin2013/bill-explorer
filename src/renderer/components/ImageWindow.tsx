@@ -116,13 +116,13 @@ function rotateBase64Image(dataUrl: string, angleDeg: number): Promise<string> {
   })
 }
 
-// 把识别行转成 TSV 文本，便于直接粘贴进 Excel（去掉不展示的调货人/备注列）
+// 把识别行转成 TSV 文本，便于直接粘贴进 Excel（去掉不展示的调货人/备注列、金额列）
 function rowsToTsv(rs: AIRecognizedRow[]): string {
-  const header = ['日期', '货品', '单位', '数量', '单价', '金额']
+  const header = ['日期', '货品', '单位', '数量', '单价']
   const lines = [header.join('\t')]
   for (const r of rs) {
     lines.push(
-      [r.date ?? '', r.name ?? '', r.unit ?? '', r.qty ?? '', r.price ?? '', r.amount ?? ''].join('\t'),
+      [r.date ?? '', r.name ?? '', r.unit ?? '', r.qty ?? '', r.price ?? ''].join('\t'),
     )
   }
   return lines.join('\n')
@@ -131,22 +131,20 @@ function rowsToTsv(rs: AIRecognizedRow[]): string {
 // 结果表列定义（已去掉调货人 / 备注：识别不准且无需记录；也不显示「序号」列，
 // 序号是自动编号、对录入无意义，打开识别结果时不再占用空间）
 const RESULT_COLS: Array<{ field: keyof AIRecognizedRow; label: string; w: string }> = [
-  { field: 'date', label: '日期', w: '92px' },
-  { field: 'name', label: '货品', w: '180px' },
-  { field: 'unit', label: '单位', w: '54px' },
-  { field: 'qty', label: '数量', w: '54px' },
-  { field: 'price', label: '单价', w: '70px' },
-  { field: 'amount', label: '金额', w: '82px' },
+  { field: 'date', label: '日期', w: '72px' },
+  { field: 'name', label: '货品', w: '70px' },
+  { field: 'unit', label: '单位', w: '38px' },
+  { field: 'qty', label: '数量', w: '38px' },
+  { field: 'price', label: '单价', w: '50px' },
 ]
 
-// 各列默认宽度（px），可被用户拖动调节；"货品"列默认放宽以便显示更全信息
+// 各列默认宽度（px），可被用户拖动调节；去掉了金额列，日期/货品/单位/数量调窄一些
 const COL_DEFAULTS: Record<string, number> = {
-  date: 92,
-  name: 180,
-  unit: 54,
-  qty: 54,
-  price: 70,
-  amount: 82,
+  date: 72,
+  name: 70,
+  unit: 38,
+  qty: 38,
+  price: 50,
 }
 
 export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWindow(
