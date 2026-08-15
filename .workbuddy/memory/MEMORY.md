@@ -23,6 +23,7 @@
 - **Univer 原生替代了原自研逻辑**：矩形框选、复制/粘贴、拖拽填充序列（序号1/2/3）、单元格编辑、滚动虚拟化——无需再维护。`SheetGrid.tsx` 已不再被引用（保留文件备查）。
 - **弃用「建议框」（拼音补全）**，待后续按需补回（Univer 有数据验证下拉可作临时替代）。
 - 依赖 `@univerjs/presets` + `@univerjs/preset-sheets-core` @0.25.1；`vite.config.ts` 已 `resolve.dedupe:['react','react-dom']`。
+- **日期列是「真实 Excel 日期列」**：Univer 会自动把输入的日期识别成序列号（serial），所以 `univerAdapter.ts` 的 `rowsToWorkbookData` 把第 2 列（0 基索引 1）建成 `{v:序列号, s:'bill-date'}` 且 `columnData` 整列默认 `bill-date` 样式（`{n:{pattern:'yyyy-mm-dd'}}`），`workbookDataToRows` 用 `normalizeDateValue` 把序列号/各种文本写法归一化成 `yyyy-mm-dd` 文本再交给 `saveSheet`。**千万不要把日期列当成纯文本、也不要去掉列 `numFmt`**，否则编辑器又会显示成裸数字（与 Excel 不一致）。序列号纪元 `1899-12-30`，与 ExcelJS `dateToSerial` 一致（已验证 2026-08-15 两端都是 46249）。
 - **CSS 铁律（踩过坑，勿犯）**：`.univer-container` 的撑满规则**必须**写成精确选择器 `.univer-container > div[data-u-comp='workbench-layout']`，**绝不能用 `.univer-container > div` 通配**。Univer 会往同一容器插入两个 `position:fixed` 的隐藏输入法/选区容器 `div#univer-doc-selection-container-*`（DOCS_NORMAL = 单元格编辑器，DOCS_FORMULA_BAR = 编辑栏），通配规则的 `width/height:100%` 对 fixed 元素解析为**整个视口**，加上它 `activate()` 时会置 `z-index:1000`，就变成一层全屏透明遮罩，把顶栏/侧栏/表头按钮全部锁死（只有 Univer 编辑区还能用），且**只有点过单元格之后才复现**（未交互时它被推到视口外 -998,-896）。因此 index.css 常驻兜底规则：`div[id^='univer-doc-selection-container-'] { position:absolute !important; width:0 !important; height:0 !important }`（absolute 同时修正 IME 候选框位置，因为 Univer 内部按「相对父容器」算 left/top）；另给 `.app-top`/`.app-side`/`.memo-header` 加 `z-index:1001`（>Univer 1000，<Univer 弹层 1020）作二重保险。
 
 ## 识图：检测 vs 内容识别 是两套链路（重要，迁移必看）
