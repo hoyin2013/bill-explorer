@@ -485,8 +485,18 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
       d.moved = true
       // 几何定位光标所在单元格（不依赖 elementFromPoint，避免命中填充柄/行号/内边距）
       const { r: rr, c: cc } = cellAtPoint(d.trs, me.clientX, me.clientY)
-      setSelRange({ r1: d.r1, c1: d.c1, r2: rr, c2: cc })
-      setActive({ r: rr, c: cc })
+      // 吸附起始单元格：只有当鼠标明显离开起始单元格一半宽高后，才允许选区扩展到
+      // 相邻行/列。这样垂直拖动时即使手有轻微横向抖动，也只会选中单列（Excel 手感）。
+      let finalR = rr
+      let finalC = cc
+      const startTd = d.trs[d.r1]?.cells[d.c1 + 1]
+      const startRect = startTd?.getBoundingClientRect()
+      if (startRect) {
+        if (Math.abs(me.clientX - d.x) < startRect.width / 2) finalC = d.c1
+        if (Math.abs(me.clientY - d.y) < startRect.height / 2) finalR = d.r1
+      }
+      setSelRange({ r1: d.r1, c1: d.c1, r2: finalR, c2: finalC })
+      setActive({ r: finalR, c: finalC })
       // 仅在光标越过滚动容器可视区上/下边缘时才滚动，让选区能延伸到视口外；
       // 视口内拖动不滚动，避免 scrollIntoView('nearest') 的正反馈把选区撑大、误吞相邻行。
       const sc = containerRef.current
