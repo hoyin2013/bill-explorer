@@ -90,8 +90,9 @@ function normalizeDateValue(v: unknown): string {
 export function mapRecognizedToRow(r: AIRecognizedRow): string[] {
   const q = Number(String(r.qty ?? '').replace(/,/g, '')) || 0
   const p = Number(String(r.price ?? '').replace(/,/g, '')) || 0
-  // 金额列（index 6）**故意留空**：金额 = 数量 × 单价，由 Univer 活公式（recomputeAmount 写入 =E*F）自动计算。
-  // 识别结果不再带入金额——否则会被写成静态数字，导致公式失效 / 与数量×单价对不上。
+  // 金额列（index 6）**故意留空**：金额 = 数量 × 单价，由 recomputeAmount 在数量/单价变化时
+  // 自动填入「数量×单价」的静态数值（不写活公式，避免 Univer 不计算而显示 0）。
+  // 识别结果不带金额——OCR 填入后该行金额为空（pending），数量/单价为正时会自动算出来。
   return [
     String(r.no ?? ''),
     parseDateText(String(r.date ?? '')),
@@ -218,4 +219,76 @@ export function workbookDataToRows(wb: IWorkbookData): string[][] {
     out.push(arr)
   }
   return out
+}
+
+// ---- 金额列：自动计算 vs 手工金额（抽成纯函数，便于无头集成测试）----
+// 金额列语义：数量(列4)×单价(列5) = 金额(列6)。绝大多数行金额自动算；
+// 少数行（整单总价、运费、折扣等）需手工填一个与乘积不同的金额，且不能被自动覆盖。
+export type AmountKind = 'auto' | 'pending' | 'manual'
+
+// 判断某行金额的归属：
+// - pending：数量>0 且 单价>0，但金额缺失/为0 → 应自动填入乘积（首次填充 / 待填）
+// - auto：数量>0 且 单价>0，且金额已是乘积（或公式）→ 自动金额行，改数量/单价时同步更新
+// - manual：数量/单价缺失，或金额≠乘积（用户手工金额）→ 不自动算、不被覆盖
+export function classifyAmount(q: number, p: number, amtRaw: unknown): AmountKind {
+  const cur = Number(String(amtRaw ?? '').replace(/,/g, '') || 0)
+  if (!(q > 0) || !(p > 0)) return 'manual'
+  // 公式串（如 =E2*F2）视为自动金额行，需先于 NaN 判断（公式数值为 NaN）
+  if (typeof amtRaw === 'string' && amtRaw.startsWith('=')) return 'auto'
+  if (amtRaw == null || amtRaw === '' || isNaN(cur) || cur === 0) return 'pending'
+  if (Math.abs(cur - q * p) < 0.005) return 'auto'
+  return 'manual'
+}
+
+// 由 string[][]（loadSheet 返回，不含表头）初始化“自动金额行”集合。
+// Univer 数据行从 1 开始（行 0 是表头），故第 i 行数据对应 Univer 行 i+1。
+// 仅把 auto/pending 行加入集合；manual（手工金额 / 缺数量单价）不加。
+export function buildAutoAmountRows(rows: string[][]): Set<number> {
+  const set = new Set<number>()
+  rows.forEach((row, idx) => {
+    const r = idx + 1
+    const q = Number(row[4] || 0)
+    const p = Number(row[5] || 0)
+    const kind = classifyAmount(q, p, row[6])
+    if (kind === 'auto' || kind === 'pending') set.add(r)
+  })
+  return set
+}
+
+// 轻量 Univer worksheet 接口（仅 recomputeAmount 所需）
+export interface WsLike {
+  getRange: (row: number, col: number) => { getValue: () => unknown; setValue: (v: number) => void }
+}
+
+// 数量/单价变化 → 金额处理。
+// - 自动行(auto) / 待填行(pending)：写入「数量×单价」（pending 行写入后纳入自动集合）
+// - 手工行(manual，金额≠乘积)：不覆盖，保留用户手填
+// - 数量或单价缺失：不动金额，留待用户手填
+export function recomputeAmount(ws: WsLike, row: number, autoRows: Set<number>): void {
+  const q = Number(ws.getRange(row, 4).getValue() ?? 0)
+  const p = Number(ws.getRange(row, 5).getValue() ?? 0)
+  const amtCell = ws.getRange(row, 6)
+  if (!(q > 0) || !(p > 0)) return // 数量或单价缺失 → 不动金额，留待用户手填
+  const curRaw = amtCell.getValue()
+  const cur = Number(String(curRaw ?? '').replace(/,/g, '') || 0)
+  const pending = curRaw == null || curRaw === '' || isNaN(cur) || cur === 0
+  // 是否“自动金额行”以 autoRows 集合为准（而非比较当前金额==乘积）：
+  // 否则改数量/单价时，旧金额≠新乘积会被误判为手工行而不更新。
+  // - 自动行 → 始终同步为 数量×单价；
+  // - 非自动行且金额待填（空/0）→ 首次填入并纳入自动集合；
+  // - 非自动行且金额已是手工值（≠乘积）→ 不覆盖，保留用户手填。
+  if (autoRows.has(row) || pending) {
+    amtCell.setValue(Math.round(q * p * 100) / 100)
+    if (pending) autoRows.add(row)
+  }
+}
+
+// 金额列被用户编辑（或一次粘贴覆盖到金额）→ 按“当前金额==数量×单价”重新归类该行：
+// 相等（或待填）→ 纳入自动集合；不等（用户手工金额）→ 移出集合（不被自动覆盖）。
+export function onAmountChanged(ws: WsLike, row: number, autoRows: Set<number>): void {
+  const q = Number(ws.getRange(row, 4).getValue() ?? 0)
+  const p = Number(ws.getRange(row, 5).getValue() ?? 0)
+  const kind = classifyAmount(q, p, ws.getRange(row, 6).getValue())
+  if (kind === 'auto' || kind === 'pending') autoRows.add(row)
+  else autoRows.delete(row)
 }

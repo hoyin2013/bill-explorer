@@ -8,6 +8,10 @@ import {
   rowsToWorkbookData,
   workbookDataToRows,
   mapRecognizedToRow,
+  buildAutoAmountRows,
+  classifyAmount,
+  recomputeAmount,
+  onAmountChanged,
   COL_COUNT,
 } from '../univerAdapter'
 
@@ -70,22 +74,15 @@ function setActiveAndScroll(
   else tryScroll(0)
 }
 
-// 数量(列4,Excel=E)/单价(列5,Excel=F)变化 → 金额(列6,Excel=G) 写入「数量×单价」的结果。
-// 对账单模型，金额恒等于 数量×单价：只要数量与单价都为正，就实时把金额算出来（覆盖写入）。
-// 这样插入新行/复制行/修改数量单价时，金额都自动生效，不会因“金额已是正数”被守卫跳过而失效。
-// 仅当数量或单价缺失（为空/0）时才不动金额列——方便“无数量单价的行手填一个独立金额”（如整单总价）。
-// 直接写计算后的静态数值（而非 =E*F 活公式）：不依赖 Univer 公式引擎是否计算，
-// 保证金额在编辑框里始终正确显示，彻底避免“公式未被计算而显示 0”的问题。
-function recomputeAmount(
-  ws: { getRange: (r: number, c: number) => { getValue: () => unknown; setValue: (v: number | string) => void } },
-  row: number,
-) {
-  const q = Number(ws.getRange(row, 4).getValue() ?? 0)
-  const p = Number(ws.getRange(row, 5).getValue() ?? 0)
-  if (q > 0 && p > 0) {
-    ws.getRange(row, 6).setValue(q * p)
-  }
-}
+// 金额列 = 数量(列4,Excel=E)×单价(列5,Excel=F)。
+// 行为（见 univerAdapter.ts 的 recomputeAmount / classifyAmount / buildAutoAmountRows）：
+// - 自动金额行（金额==数量×单价，或金额待填）→ 数量/单价变化时金额同步重算。
+// - 手工金额行（金额≠数量×单价，如整单总价/运费/折扣）→ 不被自动覆盖；
+//   改数量/单价时仍保留用户手填的金额。
+// - 数量或单价缺失 → 不动金额，留待用户手填。
+// 写的是静态数值（而非 =E*F 活公式）：不依赖 Univer 公式引擎是否计算，避免“公式未算而显示 0”。
+// `autoAmountRows` 记录哪些行是“自动金额行”，加载文件 / OCR 填入时初始化，
+// 编辑金额列时被重分类（手填≠乘积 → 移出集合；填成==乘积 → 重新纳入）。
 
 export function UniverSheet({ file, api, onClose, onSaved }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
@@ -93,6 +90,9 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
   const dirtyRef = useRef(false)
   const fileRef = useRef(file)
   fileRef.current = file
+  // 记录“自动金额行”（金额==数量×单价或待填）。手工金额行（≠乘积）不在此集合，
+  // 加载 / OCR 填入时初始化，编辑金额列时按值重分类。
+  const autoAmountRows = useRef<Set<number>>(new Set())
 
   const [status, setStatus] = useState('')
   const [saving, setSaving] = useState(false)
@@ -169,7 +169,8 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
     })
     univerRef.current = univerAPI
 
-    // 编辑即标记脏；数量/单价变化自动重算金额（金额=数量*单价）
+    // 编辑即标记脏；数量/单价变化自动重算金额（自动金额行），
+    // 金额列被编辑时按“是否==数量×单价”重分类该行（手工金额不被覆盖）。
     const disp = univerAPI.addEvent(univerAPI.Event.SheetValueChanged, (e: unknown) => {
       markDirty()
       const ev = e as { effectedRanges?: Array<{ getRange: () => { startRow: number; endRow: number; startColumn: number; endColumn: number } }> }
@@ -179,14 +180,18 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
       if (!ws) return
       for (const fr of ranges) {
         const rg = fr.getRange()
-        // 只关心数量(列4)/单价(列5)列的变化；金额列(列6)变化不触发，避免回环
-        const touches = rg.startColumn <= 5 && rg.endColumn >= 4
-        if (!touches) continue
-        for (let r = Math.max(1, rg.startRow); r <= rg.endRow; r++) {
+        const startRow = Math.max(1, rg.startRow)
+        // 数量(列4)/单价(列5)列变化 → 重算金额；金额(列6)列变化 → 重分类
+        const touchesQP = rg.startColumn <= 5 && rg.endColumn >= 4
+        const touchesAmt = rg.startColumn <= 6 && rg.endColumn >= 6
+        if (!touchesQP && !touchesAmt) continue
+        for (let r = startRow; r <= rg.endRow; r++) {
           try {
-            recomputeAmount(ws, r)
+            if (touchesQP) recomputeAmount(ws, r, autoAmountRows.current)
+            // 金额列被改（含一次粘贴覆盖到金额）：按“当前值==数量×单价”重新归类
+            if (touchesAmt) onAmountChanged(ws, r, autoAmountRows.current)
           } catch {
-            /* 单行重算失败不影响其他 */
+            /* 单行失败不影响其他 */
           }
         }
       }
@@ -201,6 +206,8 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
           return
         }
         const data = rowsToWorkbookData(res.rows)
+        // 按加载数据初始化“自动金额行”集合（金额==数量×单价或待填 → 自动；否则手工）
+        autoAmountRows.current = buildAutoAmountRows(res.rows)
         univerAPI.createWorkbook(data)
         // 激活单元格落在数据末尾空行，便于继续录入 / 默认「填入」位置；
         // 并滚动到该行，同时多留末尾几行真实数据在视野内（END_VISIBLE_LEAD）
@@ -269,6 +276,13 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
       })
       try {
         ws.getRange(startRow, 0, matrix.length, COL_COUNT).setValues(matrix)
+        // 填入行金额留空（pending），若数量/单价为正，纳入“自动金额行”集合，
+        // 方便后续改数量/单价时金额自动同步（与加载初始化口径一致）。
+        matrix.forEach((row, i) => {
+          const q = Number(row[4] || 0)
+          const p = Number(row[5] || 0)
+          if (q > 0 && p > 0) autoAmountRows.current.add(startRow + i)
+        })
         // 推进激活格到填入内容之后的空行，但保持当前视窗不动（数据落在光标处，不跳走）
         setActiveAndScroll(univerAPI, startRow + matrix.length, 0, { scroll: false })
       } catch (e) {
