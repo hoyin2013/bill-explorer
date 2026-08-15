@@ -90,7 +90,8 @@ function normalizeDateValue(v: unknown): string {
 export function mapRecognizedToRow(r: AIRecognizedRow): string[] {
   const q = Number(String(r.qty ?? '').replace(/,/g, '')) || 0
   const p = Number(String(r.price ?? '').replace(/,/g, '')) || 0
-  const a = Number(String(r.amount ?? '').replace(/,/g, '')) || 0
+  // 金额列（index 6）**故意留空**：金额 = 数量 × 单价，由 Univer 活公式（recomputeAmount 写入 =E*F）自动计算。
+  // 识别结果不再带入金额——否则会被写成静态数字，导致公式失效 / 与数量×单价对不上。
   return [
     String(r.no ?? ''),
     parseDateText(String(r.date ?? '')),
@@ -98,7 +99,7 @@ export function mapRecognizedToRow(r: AIRecognizedRow): string[] {
     String(r.unit ?? ''),
     q > 0 ? fmtNum(q) : '',
     p > 0 ? fmtNum(p) : '',
-    a > 0 ? fmtNum(a) : '',
+    '', // 金额留空，交给公式
     '', // 调货人留空
     String(r.remark ?? ''),
   ]

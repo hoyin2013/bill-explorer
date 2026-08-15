@@ -248,11 +248,12 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
       // 金额：AI 已识别则保留其数值；否则留空，由下方 SheetValueChanged 监听自动写 =E*F 活公式。
       const matrix = list.map((r) => {
         const row = mapRecognizedToRow(r) as (string | number)[]
+        // 数量/单价数值化（写数字而非文本），否则像 =E*F 的公式会因"文本*文本"得到 #VALUE!。
+        // 金额列已被 mapRecognizedToRow 置空，交给 SheetValueChanged 监听自动写 =E*F 活公式。
         const q = Number(row[4] || 0)
         const p = Number(row[5] || 0)
         row[4] = q > 0 ? q : ''
         row[5] = p > 0 ? p : ''
-        row[6] = Number(row[6]) > 0 ? Number(row[6]) : ''
         return row
       })
       try {
