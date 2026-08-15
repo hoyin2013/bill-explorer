@@ -92,6 +92,8 @@ export interface ImageSnapshot {
   listWidth: number
   listCollapsed: boolean
   dateAnchor: string | null
+  /** 手动日期联动的起始小票下标：用户首次编辑某张日期时的那张下标；从该张起（含）所有小票日期一起改 */
+  dateAnchorStart: number | null
 }
 
 export interface ElectronAPI {

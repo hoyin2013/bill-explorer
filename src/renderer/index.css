@@ -1509,6 +1509,25 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* 列宽拖拽手柄：贴在每列表头右边界，像 Excel 一样拖动调节宽度 */
+.ai-results-table .col-resizer {
+  position: absolute;
+  right: -3px;
+  top: 0;
+  width: 7px;
+  height: 100%;
+  cursor: col-resize;
+  user-select: none;
+  z-index: 3;
+  background: transparent;
+}
+.ai-col-del {
+  /* 删除列不参与拖拽 */
+}
+.ai-results-table .col-resizer:hover,
+.ai-results-table .col-resizer:active {
+  background: rgba(64, 158, 255, 0.45);
+}
 /* 停止扫描按钮（警示色） */
 .btn-warn {
   background: #e6a23c;

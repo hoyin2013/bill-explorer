@@ -132,12 +132,22 @@ function rowsToTsv(rs: AIRecognizedRow[]): string {
 // 序号是自动编号、对录入无意义，打开识别结果时不再占用空间）
 const RESULT_COLS: Array<{ field: keyof AIRecognizedRow; label: string; w: string }> = [
   { field: 'date', label: '日期', w: '92px' },
-  { field: 'name', label: '货品', w: 'auto' },
+  { field: 'name', label: '货品', w: '180px' },
   { field: 'unit', label: '单位', w: '54px' },
   { field: 'qty', label: '数量', w: '54px' },
   { field: 'price', label: '单价', w: '70px' },
   { field: 'amount', label: '金额', w: '82px' },
 ]
+
+// 各列默认宽度（px），可被用户拖动调节；"货品"列默认放宽以便显示更全信息
+const COL_DEFAULTS: Record<string, number> = {
+  date: 92,
+  name: 180,
+  unit: 54,
+  qty: 54,
+  price: 70,
+  amount: 82,
+}
 
 export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWindow(
   { api, detached, onDetach, onAttach, initialState },
@@ -208,18 +218,26 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
   const lbWrapRef = useRef<HTMLDivElement>(null)
   // 图片列表（左）与预览区（右）的可调分隔宽度（px）；面板整体偏窄，默认收窄
   const [listWidth, setListWidth] = useState(104)
-  // 左侧图片列表是否折叠：折叠后识别信息区占满整个窗口宽度，便于查看/录入
-  const [listCollapsed, setListCollapsed] = useState(false)
+  // 左侧图片列表是否折叠：默认折叠，让识别信息区占满整个窗口宽度，便于查看/录入；
+  // 需要切换图片时再点「☰ 显示列表」展开
+  const [listCollapsed, setListCollapsed] = useState(true)
+  // 识别结果表各列宽度（px）：默认取自 COL_DEFAULTS，用户可像 Excel 一样拖动列边界调节
+  const [colWidths, setColWidths] = useState<Record<string, number>>({ ...COL_DEFAULTS })
   // 复位旋转瞬间禁用过渡，避免「从旋转角回正」触发可见的旋转动画
   const [instant, setInstant] = useState(false)
   const wrapRef = useRef<HTMLDivElement>(null)
   const zoomRef = useRef(1)
   const panRef = useRef({ x: 0, y: 0 })
   const draggingRef = useRef<{ startX: number; startY: number; panX: number; panY: number } | null>(null)
-  // 日期统一基准：首次编辑某张日期后记住，并同步到当时所有小票的每一行；
-  // 之后跨图片保留（不在 loadPreview / detectOnly 重置），后续识别默认套用该日期，
-  // 避免每次靠 OCR 识别日期带来的误差。
+  // 手动日期联动：编辑某张小票的日期后，记住该值，并联动到「该张及之后」所有小票的每一行；
+  // 该张之前的票保持不变（例如从第三张开始改，则第一、二张不动）。
   const dateAnchorRef = useRef<string | null>(null)
+  // 手动联动的起始小票下标：用户首次编辑某张日期时的那张下标；之后若编辑更靠前的票则前移（取最小）。
+  // 换一张图片重新检测（detectOnly）时复位，使每张图片的联动从该图第一次编辑处重新算起。
+  const dateAnchorStartRef = useRef<number | null>(null)
+  // 识别阶段的统一日期基准：每张图片各自取首张识别出的日期作为该图统一日期（通常一图同日），
+  // 与「手动联动」分开存储，避免相互覆盖导致手动修正被识别基准吞掉。
+  const recogDateRef = useRef<string | null>(null)
   // 全局默认旋转角（度，0/90/180/270）：用户旋转任一图片后自动保存（持久化到 electron-store），
   // 之后每张图片打开 / 检测都套用此方向，避免反复手动旋转。用 ref 供异步加载读取最新值。
   const defaultRotateRef = useRef(0)
@@ -249,6 +267,7 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
       listWidth,
       listCollapsed,
       dateAnchor: dateAnchorRef.current,
+      dateAnchorStart: dateAnchorStartRef.current,
     }
   }
 
@@ -274,6 +293,7 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
     setListWidth(s.listWidth ?? 124)
     setListCollapsed(s.listCollapsed ?? false)
     dateAnchorRef.current = s.dateAnchor ?? null
+    dateAnchorStartRef.current = s.dateAnchorStart ?? null
     // 复位后台识别队列与瞬时过渡，避免残留动画 / 重复识别
     recogMgr.current.cancelled = true
     recogMgr.current.running = false
@@ -718,6 +738,24 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
     window.addEventListener('mouseup', onUp)
   }
 
+  // 拖动识别结果表列右边界调节该列宽度（像 Excel 一样）。field 为被拖动的列字段。
+  function startColResize(e: ReactMouseEvent, field: keyof AIRecognizedRow) {
+    e.preventDefault()
+    e.stopPropagation()
+    const startX = e.clientX
+    const startW = colWidths[field] ?? 100
+    const onMove = (ev: MouseEvent) => {
+      const nw = Math.max(48, startW + (ev.clientX - startX))
+      setColWidths((p) => ({ ...p, [field]: nw }))
+    }
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+  }
+
   // 行内编辑：更新非检测流程的某一行某一字段
   function updateCell(index: number, field: keyof AIRecognizedRow, value: string) {
     setRows((prev) => {
@@ -736,6 +774,24 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
 
   // 编辑检测流程中某张小票的某一行
   function updateTicketCell(ti: number, ri: number, field: keyof AIRecognizedRow, value: string) {
+    // 日期联动：编辑某张日期 → 从该张起（含）所有小票的所有行日期一起改；该张之前的票不变。
+    // 例如首次编辑第一张 → 第一张全部 + 后续所有票都改成新日期；首次编辑第三张 → 第一、二张不动，
+    // 第三张及之后联动。之后若编辑更靠前的票（如又改第一张），联动起点前移（取最小下标）。
+    // 已建立的联动在「重新识别此张」时仍被套用（recognizeTicketByIdx 中的覆盖逻辑），即结果被缓存。
+    if (field === 'date' && value.trim()) {
+      const start = dateAnchorStartRef.current == null ? ti : Math.min(dateAnchorStartRef.current, ti)
+      dateAnchorStartRef.current = start
+      dateAnchorRef.current = value
+      setTickets((prev) => {
+        const next = prev.slice()
+        for (let k = start; k < next.length; k++) {
+          next[k] = { ...next[k], rows: next[k].rows.map((rr) => ({ ...rr, date: value })) }
+        }
+        return next
+      })
+      setStatus(`已联动修改第 ${start + 1} 张及之后共 ${tickets.length - start} 张小票的日期为 ${value}`)
+      return
+    }
     setTickets((prev) => {
       const next = prev.slice()
       const t = { ...next[ti], rows: next[ti].rows.slice() }
@@ -743,16 +799,6 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
       ;(row as Record<string, string>)[field as string] = value
       t.rows[ri] = row
       next[ti] = t
-      // 日期统一：识别出的日期很不准，通常一图同日。用户首次编辑某张日期（非空）后，
-      // 记住该日期并把它同步到所有小票的每一行；之后再单独改某张日期，只改当前单元格。
-      if (field === 'date' && value.trim()) {
-        if (dateAnchorRef.current == null) {
-          dateAnchorRef.current = value
-          for (const nt of next) {
-            nt.rows = nt.rows.map((rr) => ({ ...rr, date: value }))
-          }
-        }
-      }
       return next
     })
   }
@@ -795,7 +841,11 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
     recogMgr.current.running = false
     setBgRunning(false)
     setRecogState({})
-    // 注意：保留 dateAnchorRef（不重置），让日期基准跨图片延续
+    // 重新检测 = 新的一组小票：复位识别基准与手动联动（起始下标 + 值），
+    // 让每张图片的日期联动从该图第一次编辑处重新算起，避免不同图片的日期互相串。
+    recogDateRef.current = null
+    dateAnchorRef.current = null
+    dateAnchorStartRef.current = null
     setViewMode('overview')
     try {
       // 按当前旋转把预览图旋转后送检测，使检测图与展示图一致（框坐标对齐）
@@ -925,14 +975,17 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
       }
       const src = baseName(selected)
       let rs = (res.rows || []).map((r) => ({ ...r, source: src }))
-      // 日期基准：仅首张贡献日期；其余套用基准，丢弃各自识别出的日期
-      const anchor = dateAnchorRef.current
-      if (anchor == null) {
+      // 识别阶段统一基准：每张图片取首张识别出的日期作为该图统一日期（通常一图同日）。
+      // 与「手动联动」分开存储，手动修正不会被识别基准覆盖。
+      if (recogDateRef.current == null) {
         const firstDate = rs.find((r) => (r.date || '').trim())?.date?.trim()
-        if (firstDate) dateAnchorRef.current = firstDate
-        rs = rs.map((r) => ({ ...r, date: dateAnchorRef.current ?? r.date }))
-      } else {
-        rs = rs.map((r) => ({ ...r, date: anchor }))
+        if (firstDate) recogDateRef.current = firstDate
+      }
+      rs = rs.map((r) => ({ ...r, date: recogDateRef.current ?? r.date }))
+      // 手动联动覆盖：若用户已建立联动（起始下标 + 值），且本张在联动范围内，
+      // 则套用联动日期 —— 这样「重新识别此张」(force) 也不会把手动修正的日期冲掉（相当于缓存）。
+      if (dateAnchorStartRef.current != null && i >= dateAnchorStartRef.current && dateAnchorRef.current) {
+        rs = rs.map((r) => ({ ...r, date: dateAnchorRef.current! }))
       }
       setTickets((prev) => {
         const next = prev.slice()
@@ -1257,13 +1310,24 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
 
                   {activeTicket.rows.length > 0 ? (
                     <div className="ai-results-table-wrap">
-                      <table className="ai-results-table">
+                      <table className="ai-results-table" style={{ tableLayout: 'fixed', width: 'max-content' }}>
+                        <colgroup>
+                          <col style={{ width: 26 }} />
+                          {RESULT_COLS.map((c) => (
+                            <col key={String(c.field)} style={{ width: colWidths[c.field] ?? 100 }} />
+                          ))}
+                        </colgroup>
                         <thead>
                           <tr>
                             <th className="ai-col-del" title="删除该行">×</th>
                             {RESULT_COLS.map((c) => (
-                              <th key={String(c.field)} style={{ minWidth: c.w }}>
+                              <th key={String(c.field)} title="拖动列右边界可调节宽度">
                                 {c.label}
+                                <span
+                                  className="col-resizer"
+                                  onMouseDown={(e) => startColResize(e, c.field)}
+                                  title="拖动调节列宽"
+                                />
                               </th>
                             ))}
                           </tr>
@@ -1501,16 +1565,28 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
                         </div>
                       </div>
                       <div className="ai-results-table-wrap">
-                        <table className="ai-results-table">
+                        <table className="ai-results-table" style={{ tableLayout: 'fixed', width: 'max-content' }}>
+                          <colgroup>
+                            <col style={{ width: 26 }} />
+                            {RESULT_COLS.map((c) => (
+                              <col key={String(c.field)} style={{ width: colWidths[c.field] ?? 100 }} />
+                            ))}
+                            {showSource && <col style={{ width: 130 }} />}
+                          </colgroup>
                           <thead>
                             <tr>
                               <th className="ai-col-del" title="删除该行">×</th>
                               {RESULT_COLS.map((c) => (
-                                <th key={String(c.field)} style={{ minWidth: c.w }}>
+                                <th key={String(c.field)} title="拖动列右边界可调节宽度">
                                   {c.label}
+                                  <span
+                                    className="col-resizer"
+                                    onMouseDown={(e) => startColResize(e, c.field)}
+                                    title="拖动调节列宽"
+                                  />
                                 </th>
                               ))}
-                              {showSource && <th style={{ minWidth: '110px' }}>来源</th>}
+                              {showSource && <th>来源</th>}
                             </tr>
                           </thead>
                           <tbody>
