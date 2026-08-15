@@ -269,13 +269,23 @@ function pickDataSheet(workbook: ExcelJS.Workbook): ExcelJS.Worksheet | undefine
   return best
 }
 
-// 标准日期字符串转 JS Date（Excel 原生日期），非法/空值原样返回
+// 标准日期字符串转 JS Date（Excel 原生日期），非法/空值原样返回。
+// 关键：必须用 Date.UTC 构造"UTC 午夜"，否则用 new Date(y, m-1, d)（本地午夜）会被
+// ExcelJS 按 UTC 偏移换算成带小数的序列号 —— 既差一天（如 8-15→8-14）又带时分秒。
+// 同时容忍 `2026/8/15`、尾随时间（2026-08-15 14:30:00）、`2026年8月15日`、`20260815` 等写法，
+// 一律只取"年月日"部分，保证存进 Excel 的是无时间的纯日期。
 function toExcelDate(s: string): Date | string | undefined {
   if (!s) return undefined
-  const m = /^\d{4}-\d{2}-\d{2}$/.exec(s)
+  // 去掉尾随时间（14:30:00 / 9:05 等）与空白，只保留日期部分
+  const t = String(s).trim().replace(/\s+\d{1,2}[:：]\d{1,2}([:：]\d{1,2})?$/, '')
+  let m = /^(\d{4})[-/](\d{1,2})[-/](\d{1,2})$/.exec(t)
+  if (!m) m = /^(\d{4})\D+(\d{1,2})\D+(\d{1,2})/.exec(t) // 中文 / 其它分隔符
+  if (!m) m = /^(\d{4})(\d{2})(\d{2})$/.exec(t) // 紧凑 yyyymmdd
   if (!m) return s
-  const [y, mo, d] = s.split('-').map(Number)
-  const dt = new Date(y, mo - 1, d)
+  const y = +m[1]
+  const mo = +m[2]
+  const d = +m[3]
+  const dt = new Date(Date.UTC(y, mo - 1, d))
   return isNaN(dt.getTime()) ? s : dt
 }
 
@@ -428,11 +438,13 @@ export interface SheetData {
   rows: string[][]          // 数据行，每行长度 = headerLabels.length
 }
 
-// 把 Date 按"本地时区"格式化为 yyyy-mm-dd（避免 toISOString 的 UTC 偏移导致差一天）
+// 把 Date 格式化为 yyyy-mm-dd。
+// 写入时用 Date.UTC 午夜，ExcelJS 读回也是 UTC 基准的 Date，故这里用 UTC getter 取年月日，
+// 与写入端保持一致，保证"存进去 8-15、读出来也是 8-15"往返无偏差。
 function fmtDateLocal(d: Date): string {
-  const y = d.getFullYear()
-  const m = String(d.getMonth() + 1).padStart(2, '0')
-  const day = String(d.getDate()).padStart(2, '0')
+  const y = d.getUTCFullYear()
+  const m = String(d.getUTCMonth() + 1).padStart(2, '0')
+  const day = String(d.getUTCDate()).padStart(2, '0')
   return `${y}-${m}-${day}`
 }
 

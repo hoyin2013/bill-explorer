@@ -40,6 +40,40 @@ function rawB64(dataUrl: string): string {
   return idx >= 0 ? dataUrl.slice(idx + 1) : dataUrl
 }
 
+// 把检测出的小票按「阅读顺序」重排，返回重排后的下标序列。
+// 模型默认按置信度 / 面积返回，顺序混乱；重排后：缩略图、检测框编号、「填入全部」、
+// 点「下一张」都顺着人类阅读顺序（左上角 → 横向到行尾 → 第二行 …）。
+// 算法：先按中心 y 排序，再由上到下按纵向间隙聚成「行」，行内按中心 x 从左到右。
+type BoxItem = { i: number; cx: number; cy: number; top: number; bottom: number }
+function readingOrderIndices(boxes: DetectedBox[]): number[] {
+  const items: BoxItem[] = boxes.map((b, i) => ({
+    i,
+    cx: b.x + b.w / 2,
+    cy: b.y + b.h / 2,
+    top: b.y,
+    bottom: b.y + b.h,
+  }))
+  if (items.length <= 1) return items.map((it) => it.i)
+  items.sort((a, b) => a.cy - b.cy || a.cx - b.cx)
+  const avgH = items.reduce((s, it) => s + (it.bottom - it.top), 0) / items.length
+  const tol = Math.max(20, avgH * 0.5) // 行间距阈值：超过平均高度一半即视为换行
+  const rows: BoxItem[][] = []
+  let cur: BoxItem[] = []
+  let lastBottom = -Infinity
+  for (const it of items) {
+    if (cur.length && it.top - lastBottom > tol) {
+      rows.push(cur)
+      cur = []
+      lastBottom = -Infinity
+    }
+    cur.push(it)
+    lastBottom = Math.max(lastBottom, it.bottom)
+  }
+  if (cur.length) rows.push(cur)
+  rows.forEach((r) => r.sort((a, b) => a.cx - b.cx))
+  return rows.flat().map((it) => it.i)
+}
+
 // 用 canvas 把图片按 angleDeg（顺时针，90 的整数倍）旋转，返回新的 data URL。
 // 用于在送检测前把整图手动旋转到正向，使检测框坐标与旋转后的展示图对齐。
 function rotateBase64Image(dataUrl: string, angleDeg: number): Promise<string> {
@@ -768,10 +802,15 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
       if (res.modelAvailable === false) {
         setStatus(res.message || '检测模型不可用，请检查设置中的 Python 解释器与模型路径')
       } else if (res.tickets) {
-        setBoxes(res.boxes || [])
-        setTickets(res.tickets)
+        // 按阅读顺序（左上→右→下一行）重排 boxes 与 tickets，使缩略图、检测框编号、
+        // 「填入全部」均按人类阅读顺序；同时把每张小票的 index 更新为新序号。
+        const rawBoxes = res.boxes || []
+        const rawTickets = res.tickets
+        const order = readingOrderIndices(rawBoxes)
+        setBoxes(order.map((i) => rawBoxes[i]))
+        setTickets(order.map((i, k) => ({ ...rawTickets[i], index: k + 1 })))
         if (res.imageWidth) setImgNatural({ w: res.imageWidth, h: res.imageHeight || 0 })
-        setStatus(`检测到 ${res.tickets.length} 张小票，点击下方检测框或下方缩略图放大，再点「识别此张」读取文字`)
+        setStatus(`检测到 ${rawTickets.length} 张小票，点击下方检测框或下方缩略图放大，再点「识别此张」读取文字`)
       } else {
         setStatus(res.message || '未检测到小票')
       }
