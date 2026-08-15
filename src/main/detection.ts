@@ -316,7 +316,7 @@ export async function detectTickets(opts: DetectOptions): Promise<DetectResult> 
     const run = await runOnnxInProcess(
       scriptPath,
       onnxModel,
-      { conf: opts.conf ?? 0.25, iou: 0.45, imgsz: 640, noCrops: !opts.crops, noRotate: false },
+      { conf: opts.conf ?? 0.25, iou: 0.45, imgsz: 640, noCrops: !opts.crops, noRotate: true },
       img.base64,
     )
     return finish(run, 'ONNX')
@@ -336,7 +336,7 @@ export async function detectTickets(opts: DetectOptions): Promise<DetectResult> 
           '检测模型需要 ONNX 运行时（models/ticket_detect.onnx）。请先导出 ONNX，或在设置中指定已安装 ultralytics 的 Python 路径。',
       }
     }
-    const args = [scriptPath, modelPath, '--conf', String(opts.conf ?? 0.25)]
+    const args = [scriptPath, modelPath, '--conf', String(opts.conf ?? 0.25), '--no-rotate']
     if (!opts.crops) args.push('--no-crops')
     const run = await runPython(pythonBin, args, img.base64)
     return finish(run, 'Python')
@@ -368,7 +368,7 @@ export async function detectFromFile(
     const run = await runOnnxInProcess(
       scriptPath,
       onnxModel,
-      { conf: 0.25, iou: 0.45, imgsz: 640, noCrops: !opts?.crops, noRotate: false },
+      { conf: 0.25, iou: 0.45, imgsz: 640, noCrops: !opts?.crops, noRotate: true },
       b64,
     )
     if (run.error || !run.stdout.trim()) {

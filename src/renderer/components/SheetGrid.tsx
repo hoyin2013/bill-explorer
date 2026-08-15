@@ -212,6 +212,8 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
   } | null>(null)
   // 框选拖拽结束的尾随 click 不处理（否则会把刚框好的选区又清掉）
   const suppressClickRef = useRef(false)
+  // 拖拽（框选/填充）结束松手那一刻的 setActive 也不要触发自动滚动，避免视图跳一下
+  const suppressScrollRef = useRef(false)
   // 撤销 / 重做栈：存整表快照（string[][]），账本行数量级下开销可忽略
   const undoRef = useRef<string[][][]>([])
   const redoRef = useRef<string[][][]>([])
@@ -344,6 +346,16 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
   const didInitialScroll = useRef(false)
   useEffect(() => {
     if (!loaded || !activeTdRef.current) return
+    // 拖拽框选 / 填充柄过程中不自动滚动：否则每次 setActive 触发的 scrollIntoView
+    // 会与静止的鼠标位置形成正反馈 —— 视图滚动后光标落在相邻行上，选区被越界吞入
+    // 上一行 / 下一行，表现为"没选中的相邻行也被染蓝"。改为在 onMove 里只在光标越过
+    // 容器边缘时才滚动（见 onCellMouseDown），既能延伸到视口外，又不会失控。
+    if (rangeDragRef.current || fillDragRef.current) return
+    // 拖拽结束松手那一下也别滚动（已由 onUp 把激活格还原到锚点，无需再跳）
+    if (suppressScrollRef.current) {
+      suppressScrollRef.current = false
+      return
+    }
     const first = !didInitialScroll.current
     activeTdRef.current.scrollIntoView({
       block: first ? 'center' : 'nearest',
@@ -475,6 +487,14 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
       const { r: rr, c: cc } = cellAtPoint(d.trs, me.clientX, me.clientY)
       setSelRange({ r1: d.r1, c1: d.c1, r2: rr, c2: cc })
       setActive({ r: rr, c: cc })
+      // 仅在光标越过滚动容器可视区上/下边缘时才滚动，让选区能延伸到视口外；
+      // 视口内拖动不滚动，避免 scrollIntoView('nearest') 的正反馈把选区撑大、误吞相邻行。
+      const sc = containerRef.current
+      if (sc) {
+        const cr = sc.getBoundingClientRect()
+        if (me.clientY < cr.top) sc.scrollTop -= 28
+        else if (me.clientY > cr.bottom) sc.scrollTop += 28
+      }
     }
     const onUp = () => {
       window.removeEventListener('mousemove', onMove)
@@ -487,6 +507,7 @@ export function SheetGrid({ file, api, onClose, onSaved }: Props) {
       } else {
         // 拖拽结束：激活格回到拖拽起点（Excel 习惯：活动单元格=按下处），
         // 并吞掉尾随 click，避免刚框好的选区被单击清掉
+        suppressScrollRef.current = true
         setActive({ r: d.r1, c: d.c1 })
         suppressClickRef.current = true
         window.setTimeout(() => {

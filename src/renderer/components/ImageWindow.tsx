@@ -43,7 +43,8 @@ function rawB64(dataUrl: string): string {
 // 把检测出的小票按「阅读顺序」重排，返回重排后的下标序列。
 // 模型默认按置信度 / 面积返回，顺序混乱；重排后：缩略图、检测框编号、「填入全部」、
 // 点「下一张」都顺着人类阅读顺序（左上角 → 横向到行尾 → 第二行 …）。
-// 算法：先按中心 y 排序，再由上到下按纵向间隙聚成「行」，行内按中心 x 从左到右。
+// 算法：先按中心 y 升序；再把「中心 y 与当前行中心距离小于阈值」的归为同一行（用行平均中心
+// 而非上一张的底部做判断，避免某张特别高 / 偏低的票把相邻行错并进来），行内按中心 x 从左到右。
 type BoxItem = { i: number; cx: number; cy: number; top: number; bottom: number }
 function readingOrderIndices(boxes: DetectedBox[]): number[] {
   const items: BoxItem[] = boxes.map((b, i) => ({
@@ -54,20 +55,26 @@ function readingOrderIndices(boxes: DetectedBox[]): number[] {
     bottom: b.y + b.h,
   }))
   if (items.length <= 1) return items.map((it) => it.i)
+  // 先按中心 y 升序（y 相同时再按 x），给出稳定的初始顺序
   items.sort((a, b) => a.cy - b.cy || a.cx - b.cx)
-  const avgH = items.reduce((s, it) => s + (it.bottom - it.top), 0) / items.length
-  const tol = Math.max(20, avgH * 0.5) // 行间距阈值：超过平均高度一半即视为换行
+  // 行高阈值：用「中位高度」而不是平均高度，避免被极个别超高的票带偏阈值
+  const heights = items.map((it) => it.bottom - it.top).sort((a, b) => a - b)
+  const medianH = heights[Math.floor(heights.length / 2)] || 1
+  const tol = Math.max(20, medianH * 0.6) // 与当前行中心纵向差超过此值 → 视为换到下一行
   const rows: BoxItem[][] = []
   let cur: BoxItem[] = []
-  let lastBottom = -Infinity
   for (const it of items) {
-    if (cur.length && it.top - lastBottom > tol) {
-      rows.push(cur)
-      cur = []
-      lastBottom = -Infinity
+    if (cur.length === 0) {
+      cur.push(it)
+    } else {
+      const mid = cur.reduce((s, c) => s + c.cy, 0) / cur.length
+      if (it.cy - mid > tol) {
+        rows.push(cur)
+        cur = [it]
+      } else {
+        cur.push(it)
+      }
     }
-    cur.push(it)
-    lastBottom = Math.max(lastBottom, it.bottom)
   }
   if (cur.length) rows.push(cur)
   rows.forEach((r) => r.sort((a, b) => a.cx - b.cx))

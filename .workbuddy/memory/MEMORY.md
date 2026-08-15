@@ -7,6 +7,7 @@
 - 打开 Excel 走主进程 `loadSheet`（IPC），用 `ws.eachRow` 单遍遍历读取；异常超大文件（rowCount>SAFE_MAX_ROWS=100_000）直接拦截弹窗，不读数据。
 - **识图面板「序号」列已移除**：AI 识别结果表（`ImageWindow` 的 `RESULT_COLS`）不再显示序号列（该列是自动编号、对录入无意义）。
 - **识图图片旋转持久化为全局默认方向**：旋转任一图片（总览视图 ↺/↻）即通过 `set-image-rotation` 把角度（0/90/180/270）存进 electron-store 的 `imageRotation`；之后每张图片 `loadPreview` 自动套用 `defaultRotateRef`，检测（`detectOnly`→`rotatePreviewForDetect`）也按此方向切图。单张视图的 `singleRotate` 仅本地显示、不持久化（裁剪图已含方向）。
+- **识图裁剪图不做自动旋转（noRotate:true）**：`detectTickets`（`src/main/detection.ts`，含 ONNX 主路径、`detectFromFile`、Python 回退三处）一律 `noRotate:true`。即每张小票 crop = 用户手动转好的整图的原始矩形切片，**不再逐张 `bestRotation` 自动旋转**——逐张自动旋转对近方形/文字少的小票常猜错角度，导致单张视图"横七竖八"。方向以用户手动整图旋转为准；个别小票若仍需微调，用单张视图 ↺/↻（`singleRotate`，仅显示不改 crop）。
 
 ## 架构要点
 - 渲染进程 `src/renderer/*`（tsconfig.json include），主进程 `src/main/*`（esbuild 打包，忽略 tsc 类型告警）。
