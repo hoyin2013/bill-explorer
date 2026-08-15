@@ -20,6 +20,39 @@ interface Props {
   onSaved: () => void
 }
 
+// 设置激活单元格，并确保视图滚动到该单元格。
+// 根因：Univer 在 createWorkbook 之后骨架（render）尚未创建完成，此时任何滚动命令都找不到
+// 渲染层而静默/抛错失败（光标数据层已跳到目标行，视图却停在原地）。
+// 所以用 `sheet.command.scroll-view` 显式滚动（按行索引，走 SheetScrollManagerService，
+// 不依赖缺失的 SheetsScrollRenderController），并做重试：render 一就绪即滚动成功。
+function setActiveAndScroll(univerAPI: UniverAPI, row: number, col: number) {
+  const active = univerAPI.getActiveSheet()
+  if (!active) return
+  const ws = active.worksheet
+  try {
+    ws.setActiveRange(ws.getRange(row, col))
+  } catch {
+    /* 激活失败不影响其余功能 */
+  }
+  const api = univerAPI as unknown as {
+    executeCommand: (id: string, params?: object) => Promise<unknown> | unknown
+  }
+  const params = { sheetViewStartRow: row, sheetViewStartColumn: col, offsetX: 0, offsetY: 0 }
+  const tryScroll = (attempt: number) => {
+    try {
+      Promise.resolve(api.executeCommand('sheet.command.scroll-view', params)).then((ok) => {
+        if (!ok && attempt < 12) setTimeout(() => tryScroll(attempt + 1), 100)
+      }).catch(() => {
+        if (attempt < 12) setTimeout(() => tryScroll(attempt + 1), 100)
+      })
+    } catch {
+      if (attempt < 12) setTimeout(() => tryScroll(attempt + 1), 100)
+    }
+  }
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(() => tryScroll(0))
+  else tryScroll(0)
+}
+
 export function UniverSheet({ file, api, onClose, onSaved }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const univerRef = useRef<UniverAPI | null>(null)
@@ -115,17 +148,9 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
         }
         const data = rowsToWorkbookData(res.rows)
         univerAPI.createWorkbook(data)
-        // 激活单元格落在数据末尾空行，便于继续录入 / 默认「填入」位置
-        const target = univerAPI.getActiveSheet()
-        if (target) {
-          const ws = target.worksheet
-          const r = Math.max(1, Math.min(res.rows.length + 1, 100000))
-          try {
-            ws.setActiveRange(ws.getRange(r, 0))
-          } catch {
-            /* 激活位置失败不影响使用 */
-          }
-        }
+        // 激活单元格落在数据末尾空行，便于继续录入 / 默认「填入」位置；并滚动到该行
+        const r = Math.max(1, Math.min(res.rows.length + 1, 100000))
+        setActiveAndScroll(univerAPI, r, 0)
       } catch (e) {
         if (!disposed) setStatus('打开失败：' + (e instanceof Error ? e.message : '未知错误'))
       }
@@ -163,7 +188,8 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
       const matrix = list.map(mapRecognizedToRow)
       try {
         ws.getRange(startRow, 0, matrix.length, COL_COUNT).setValues(matrix)
-        ws.setActiveRange(ws.getRange(startRow + matrix.length, 0))
+        // 推进激活格到填入内容之后的空行，并滚动到该位置（让光标始终可见）
+        setActiveAndScroll(univerAPI, startRow + matrix.length, 0)
       } catch (e) {
         setStatus('填入失败：' + (e instanceof Error ? e.message : '未知错误'))
         return
