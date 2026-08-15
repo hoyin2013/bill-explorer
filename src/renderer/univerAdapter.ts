@@ -12,6 +12,8 @@ const SHEET_ID = 'bill'
 // 日期列（第 2 列，0 基索引 1）的样式 id。该列在 Univer 里按 yyyy-mm-dd 显示，
 // 与 Excel 中 numFmt='yyyy-mm-dd' 保持一致 —— 这样编辑器里看到的就是打开 Excel 后看到的，所见即所得。
 const DATE_STYLE = 'bill-date'
+// 表头样式 id：浅蓝底，让首行（表头）在滚动时更醒目（与冻结首行搭配使用）
+const HEADER_STYLE = 'bill-header'
 
 // Excel / Univer 日期序列号纪元：1899-12-30（与 ExcelJS 一致，2026 年这类远期日期无 1900 闰年 bug 干扰）
 const EXCEL_EPOCH = Date.UTC(1899, 11, 30)
@@ -125,6 +127,8 @@ export function rowsToWorkbookData(rows: string[][]): Partial<IWorkbookData> {
   const cellData: Record<number, Record<number, { v?: string | number; f?: string; s?: string }>> = {}
   all.forEach((row, r) => {
     const rowObj: Record<number, { v?: string | number; f?: string; s?: string }> = {}
+    // 首行是表头，套用表头样式（浅蓝底）；其余数据行不套
+    const isHeader = r === 0
     for (let c = 0; c < COL_COUNT; c++) {
       const val = row[c] ?? ''
       if (c === 1) {
@@ -141,7 +145,7 @@ export function rowsToWorkbookData(rows: string[][]): Partial<IWorkbookData> {
       if (val.startsWith('=')) {
         // 公式单元格（如 金额=数量*单价）：直接以公式本体写入，Univer 负责计算并显示结果。
         // Univer 的 `f` 字段即公式字符串（含 `=` 前缀），与读取端 cellToText 对应。
-        rowObj[c] = { f: val }
+        rowObj[c] = { f: val, ...(isHeader ? { s: HEADER_STYLE } : {}) }
         continue
       }
       if (c === 4 || c === 5 || c === 6) {
@@ -149,11 +153,11 @@ export function rowsToWorkbookData(rows: string[][]): Partial<IWorkbookData> {
         // 否则像 `=E2*F2` 这样的公式会做“文本*文本”→ #VALUE!。
         const n = Number(val)
         if (!isNaN(n) && val.trim() !== '') {
-          rowObj[c] = { v: n }
+          rowObj[c] = { v: n, ...(isHeader ? { s: HEADER_STYLE } : {}) }
           continue
         }
       }
-      rowObj[c] = { v: val }
+      rowObj[c] = { v: val, ...(isHeader ? { s: HEADER_STYLE } : {}) }
     }
     cellData[r] = rowObj
   })
@@ -176,6 +180,8 @@ export function rowsToWorkbookData(rows: string[][]): Partial<IWorkbookData> {
     name: '账单',
     styles: {
       [DATE_STYLE]: { n: { pattern: 'yyyy-mm-dd' } },
+      // 表头浅蓝底，增强可读性（与冻结首行搭配）
+      [HEADER_STYLE]: { bg: { rgb: '#BDD7EE' } },
     },
     sheetOrder: [SHEET_ID],
     sheets: { [SHEET_ID]: sheet },
