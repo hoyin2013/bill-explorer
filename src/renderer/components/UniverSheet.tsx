@@ -62,6 +62,14 @@ const COL_WIDTH_GUTTER = 64
 // 这样边录边存，输完一张即可继续下一张，且大幅降低意外丢失风险。
 const AUTOSAVE_DELAY = 1000
 
+// 单元格输入记忆（自动补全）：编辑单元格时，根据「本列已有值 + 历史记录」给出提示，辅助快速输入。
+// 行为类似 Excel 的按列自动完成：你打字时，下方浮现本列曾出现过的、以及你以前输入过的相近内容。
+// - AC_MAX_SUGGESTIONS：弹出候选最多条数
+// - AC_HISTORY_CAP：每个「文件+列」持久化保留的历史条数上限（localStorage，跨会话记忆）
+const AC_MAX_SUGGESTIONS = 12
+const AC_HISTORY_CAP = 200
+const AC_HISTORY_PREFIX = 'bill-ac-history::'
+
 function setActiveAndScroll(
   univerAPI: UniverAPI,
   row: number,
@@ -131,6 +139,27 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const savingRef = useRef(false)
   const pendingSaveRef = useRef(false)
+  // 单元格输入记忆（自动补全）相关：
+  // - acEditorRef：当前正在编辑的单元格编辑器 DOM（contentEditable[data-u-comp='editor']）
+  // - acStateRef：弹出状态机的可变数据（避免打字时频繁 setState 引起重渲染）；items 为候选
+  // - acAcceptingRef：正在“选中并填充”的过程中，避免程序化 input 事件被自身监听器误处理
+  // - acUi：仅供渲染弹层的快照（open/items/index/定位）
+  const acEditorRef = useRef<HTMLElement | null>(null)
+  const acAcceptingRef = useRef(false)
+  const acStateRef = useRef<{
+    open: boolean
+    items: string[]
+    index: number
+    col: number
+    row: number
+    partial: string
+  }>({ open: false, items: [], index: 0, col: -1, row: -1, partial: '' })
+  const [acUi, setAcUi] = useState<{
+    open: boolean
+    items: string[]
+    index: number
+    rect: { left: number; top: number; bottom: number } | null
+  }>({ open: false, items: [], index: 0, rect: null })
 
   const markDirty = () => {
     if (!dirtyRef.current) {
@@ -213,6 +242,103 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
       autoSaveTimerRef.current = null
       void saveRef.current(true)
     }, AUTOSAVE_DELAY)
+  }
+
+  // ===== 单元格输入记忆（自动补全） =====
+  // 历史存于 localStorage：键 = 文件+列，值为该列曾输入过的去重字符串数组（跨会话保留）。
+  const historyKeyOf = (col: number) => `${AC_HISTORY_PREFIX}${fileRef.current.filePath}::${col}`
+  const loadHistory = (key: string): string[] => {
+    try {
+      const s = localStorage.getItem(key)
+      const arr = s ? JSON.parse(s) : []
+      return Array.isArray(arr) ? arr.filter((x) => typeof x === 'string') : []
+    } catch {
+      return []
+    }
+  }
+  // 把某次输入值追加进该列历史（去重 + 截断到上限）
+  const pushHistory = (col: number, value: string) => {
+    const v = (value ?? '').toString().trim()
+    if (!v) return
+    const key = historyKeyOf(col)
+    const set = new Set(loadHistory(key))
+    set.add(v)
+    const next = [...set].slice(-AC_HISTORY_CAP)
+    try {
+      localStorage.setItem(key, JSON.stringify(next))
+    } catch {
+      /* 配额/隐私模式下静默忽略 */
+    }
+  }
+  // 读取当前工作表某一列里出现过的所有（去重、非空）值，作为“本列曾经内容”的候选源。
+  const getColumnValues = (col: number): string[] => {
+    const univerAPI = univerRef.current
+    const wb = univerAPI?.getActiveWorkbook()?.getSnapshot()
+    const sheets = wb?.sheets as Record<string, { cellData?: Record<number, Record<number, { v?: unknown }>> }> | undefined
+    const sheet = sheets ? (sheets['bill'] ?? Object.values(sheets)[0]) : undefined
+    const cd = sheet?.cellData
+    if (!cd) return []
+    const set = new Set<string>()
+    for (const r of Object.keys(cd)) {
+      const cell = cd[Number(r)]?.[col]
+      if (cell && cell.v != null) {
+        const s = String(cell.v).trim()
+        if (s) set.add(s)
+      }
+    }
+    return [...set]
+  }
+  // 综合「本列已有值 + 历史记录」，按 partial 大小写不敏感包含匹配，返回候选（≤上限，startsWith 优先）。
+  const computeSuggestions = (partial: string, col: number): string[] => {
+    const p = partial.trim().toLowerCase()
+    if (!p) return []
+    const merged = Array.from(new Set([...getColumnValues(col), ...loadHistory(historyKeyOf(col))]))
+    const matched = merged.filter((s) => s.toLowerCase().includes(p))
+    matched.sort((a, b) => {
+      const ai = a.toLowerCase().startsWith(p) ? 0 : 1
+      const bi = b.toLowerCase().startsWith(p) ? 0 : 1
+      if (ai !== bi) return ai - bi
+      return a.localeCompare(b)
+    })
+    return matched.slice(0, AC_MAX_SUGGESTIONS)
+  }
+  const showAc = (items: string[], rect: DOMRect) => {
+    acStateRef.current = { ...acStateRef.current, open: true, items, index: 0 }
+    setAcUi({ open: true, items, index: 0, rect: { left: rect.left, top: rect.top, bottom: rect.bottom } })
+  }
+  const hideAc = () => {
+    if (!acStateRef.current.open && !acUi.open) return
+    acStateRef.current = { ...acStateRef.current, open: false, items: [], index: 0 }
+    setAcUi({ open: false, items: [], index: 0, rect: null })
+  }
+  // 选中某条候选：把完整文本写入编辑器（并派发 input 让 Univer 更新缓冲区），
+  // 再派发 Enter 让 Univer 把内容提交到单元格；同时记入该列历史。
+  const acceptAc = (value: string) => {
+    const editor = acEditorRef.current
+    const st = acStateRef.current
+    if (!editor || !value) {
+      hideAc()
+      return
+    }
+    const col = st.col
+    acAcceptingRef.current = true
+    try {
+      editor.focus()
+      editor.textContent = value
+      editor.dispatchEvent(new InputEvent('input', { bubbles: true }))
+    } finally {
+      acAcceptingRef.current = false
+    }
+    pushHistory(col, value)
+    hideAc()
+    // 派发 Enter 提交（捕获期我们的 keydown 监听器已因 open=false 提前返回，不会递归）
+    try {
+      editor.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }),
+      )
+    } catch {
+      /* 某些环境不支持构造 KeyboardEvent，交由用户手动回车 */
+    }
   }
 
   // 关闭文件：若有未保存修改，先自动保存（不弹确认框），保存成功后再关闭；
@@ -298,12 +424,20 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
         // 数量(列4)/单价(列5)列变化 → 重算金额；金额(列6)列变化 → 重分类
         const touchesQP = rg.startColumn <= 5 && rg.endColumn >= 4
         const touchesAmt = rg.startColumn <= 6 && rg.endColumn >= 6
-        if (!touchesQP && !touchesAmt) continue
         for (let r = startRow; r <= rg.endRow; r++) {
           try {
             if (touchesQP) recomputeAmount(ws, r, autoAmountRows.current)
             // 金额列被改（含一次粘贴覆盖到金额）：按“当前值==数量×单价”重新归类
             if (touchesAmt) onAmountChanged(ws, r, autoAmountRows.current)
+          } catch {
+            /* 单行失败不影响其他 */
+          }
+        }
+        // 记录输入历史：仅“单格”提交时记录（避免 OCR 批量填入 / 金额整列重算污染历史）
+        if (rg.startRow === rg.endRow && rg.startColumn === rg.endColumn) {
+          try {
+            const v = String(ws.getRange(rg.startRow, rg.startColumn).getValue() ?? '')
+            pushHistory(rg.startColumn, v)
           } catch {
             /* 单行失败不影响其他 */
           }
@@ -437,6 +571,93 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
     return () => window.removeEventListener('keydown', onKey)
   }, [])
 
+  // 单元格输入记忆：监听文档级 input/keydown/focusout（捕获阶段），
+  // 检测 Univer 单元格编辑器（contentEditable[data-u-comp='editor']）并驱动自动补全弹层。
+  // 用捕获阶段可在 Univer 自身快捷键之前拦截上下键/回车/Esc，做到「像 Excel 一样边打边提示」。
+  useEffect(() => {
+    const onEditorInput = (e: Event) => {
+      if (acAcceptingRef.current) return
+      const t = e.target as HTMLElement | null
+      if (!t || t.getAttribute('data-u-comp') !== 'editor') {
+        if (acStateRef.current.open) hideAc()
+        return
+      }
+      const editor = t
+      acEditorRef.current = editor
+      const univerAPI = univerRef.current
+      const active = univerAPI?.getActiveSheet()
+      if (!active) return
+      const ws = active.worksheet
+      const ar = ws.getActiveRange()
+      if (!ar) return
+      const col = ar.getColumn()
+      const partial = (editor.innerText || '').replace(/\s+$/, '')
+      const rect = editor.getBoundingClientRect()
+      if (!partial) {
+        hideAc()
+        return
+      }
+      const items = computeSuggestions(partial, col)
+      if (!items.length) {
+        hideAc()
+        return
+      }
+      acStateRef.current = { ...acStateRef.current, open: true, items, index: 0, col, row: ar.getRow(), partial }
+      setAcUi({ open: true, items, index: 0, rect: { left: rect.left, top: rect.top, bottom: rect.bottom } })
+    }
+
+    const onEditorKeydown = (e: KeyboardEvent) => {
+      if (!acStateRef.current.open) return
+      const st = acStateRef.current
+      const items = st.items
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        e.stopPropagation()
+        const idx = (st.index + 1) % items.length
+        acStateRef.current = { ...st, index: idx }
+        setAcUi((u) => ({ ...u, index: idx }))
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        e.stopPropagation()
+        const idx = (st.index - 1 + items.length) % items.length
+        acStateRef.current = { ...st, index: idx }
+        setAcUi((u) => ({ ...u, index: idx }))
+      } else if (e.key === 'Enter' || e.key === 'Tab') {
+        if (items.length) {
+          e.preventDefault()
+          e.stopPropagation()
+          acceptAc(items[st.index])
+        }
+      } else if (e.key === 'Escape') {
+        e.preventDefault()
+        e.stopPropagation()
+        hideAc()
+      }
+    }
+
+    // 编辑器失焦（点到别处）时收起弹层；点弹层项用 onMouseDown 保持焦点，不会触发收起
+    const onEditorBlur = () => {
+      if (!acStateRef.current.open) return
+      setTimeout(() => {
+        if (acStateRef.current.open) {
+          const ed = acEditorRef.current
+          if (!ed || document.activeElement !== ed) hideAc()
+        }
+      }, 120)
+    }
+
+    document.addEventListener('input', onEditorInput, true)
+    document.addEventListener('keydown', onEditorKeydown, true)
+    document.addEventListener('focusout', onEditorBlur, true)
+    return () => {
+      document.removeEventListener('input', onEditorInput, true)
+      document.removeEventListener('keydown', onEditorKeydown, true)
+      document.removeEventListener('focusout', onEditorBlur, true)
+    }
+    // 这些回调只依赖 refs / 稳定 setter，故仅挂载一次
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   return (
     <div className="univer-sheet">
       <div className="memo-header">
@@ -460,6 +681,26 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
         </div>
       </div>
       <div ref={containerRef} className="univer-container" />
+      {acUi.open && acUi.rect && (
+        <div className="ac-popup" style={{ left: acUi.rect.left, top: acUi.rect.bottom + 2 }}>
+          {acUi.items.map((it, i) => (
+            <div
+              key={i}
+              className={'ac-item' + (i === acUi.index ? ' ac-active' : '')}
+              onMouseEnter={() => {
+                acStateRef.current = { ...acStateRef.current, index: i }
+                setAcUi((u) => ({ ...u, index: i }))
+              }}
+              onMouseDown={(e) => {
+                e.preventDefault()
+                acceptAc(it)
+              }}
+            >
+              {it}
+            </div>
+          ))}
+        </div>
+      )}
       {status && <div className="memo-status">{status}</div>}
     </div>
   )
