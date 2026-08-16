@@ -38,6 +38,20 @@ interface ScrollOpts {
   scroll?: boolean
 }
 
+// 结构性变更命令关键字（删/插行、列、区域移动等）：这类命令改的是表结构，
+// 不一定触发 SheetValueChanged，但会改变数据。若不标记“有修改”，关闭时就不会自动保存
+// （典型表现：删了行，关闭重开内容还在）。故在 CommandExecuted 里用子串匹配捕获，
+// 以覆盖 remove-row / remove-row-by-range 等变体命令 id。
+const SHEET_STRUCT_MUTATION_KEYWORDS = [
+  'remove-row',
+  'remove-col',
+  'insert-row',
+  'insert-col',
+  'delete-range-move',
+  'insert-range-move',
+  'move-range',
+]
+
 function setActiveAndScroll(
   univerAPI: UniverAPI,
   row: number,
@@ -176,6 +190,18 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
     })
     univerRef.current = univerAPI
 
+    // 结构性变更（删/插行、列、区域移动等）不一定触发 SheetValueChanged，
+    // 但会改变数据，必须标记为“有修改”以便关闭时自动保存。
+    const dispCmd = univerAPI.addEvent(univerAPI.Event.CommandExecuted, (e: unknown) => {
+      const ev = e as { id?: string }
+      if (
+        ev && typeof ev.id === 'string' &&
+        SHEET_STRUCT_MUTATION_KEYWORDS.some((k) => ev.id!.includes(k))
+      ) {
+        markDirty()
+      }
+    })
+
     // 编辑即标记脏；数量/单价变化自动重算金额（自动金额行），
     // 金额列被编辑时按“是否==数量×单价”重分类该行（手工金额不被覆盖）。
     const disp = univerAPI.addEvent(univerAPI.Event.SheetValueChanged, (e: unknown) => {
@@ -229,6 +255,11 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
       disposed = true
       try {
         disp.dispose()
+      } catch {
+        /* noop */
+      }
+      try {
+        dispCmd.dispose()
       } catch {
         /* noop */
       }
