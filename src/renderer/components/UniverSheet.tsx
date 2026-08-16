@@ -158,8 +158,8 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
     open: boolean
     items: string[]
     index: number
-    rect: { left: number; top: number; bottom: number } | null
-  }>({ open: false, items: [], index: 0, rect: null })
+    pos: { left: number; top: number } | null
+  }>({ open: false, items: [], index: 0, pos: null })
 
   const markDirty = () => {
     if (!dirtyRef.current) {
@@ -302,43 +302,78 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
     })
     return matched.slice(0, AC_MAX_SUGGESTIONS)
   }
+  // 根据编辑框位置计算弹层坐标：默认在编辑框下方；若下方空间不足（单元格靠近窗口底部），
+  // 则翻到编辑框上方，避免弹层被裁掉导致「内容不全 / 只能点到前面几条」。
+  const computeAcPos = (editorRect: DOMRect, itemsCount: number): { left: number; top: number } => {
+    const estH = Math.min(220, itemsCount * 29 + 10)
+    const vh = window.innerHeight || 600
+    const belowTop = editorRect.bottom + 2
+    const aboveTop = editorRect.top - estH - 2
+    let top = belowTop
+    if (belowTop + estH > vh - 8 && aboveTop > 8) top = aboveTop
+    top = Math.max(8, Math.min(top, vh - estH - 8))
+    return { left: editorRect.left, top }
+  }
   const showAc = (items: string[], rect: DOMRect) => {
+    const pos = computeAcPos(rect, items.length)
     acStateRef.current = { ...acStateRef.current, open: true, items, index: 0 }
-    setAcUi({ open: true, items, index: 0, rect: { left: rect.left, top: rect.top, bottom: rect.bottom } })
+    setAcUi({ open: true, items, index: 0, pos })
   }
   const hideAc = () => {
     if (!acStateRef.current.open && !acUi.open) return
     acStateRef.current = { ...acStateRef.current, open: false, items: [], index: 0 }
-    setAcUi({ open: false, items: [], index: 0, rect: null })
+    setAcUi({ open: false, items: [], index: 0, pos: null })
   }
-  // 选中某条候选：把完整文本写入编辑器（并派发 input 让 Univer 更新缓冲区），
-  // 再派发 Enter 让 Univer 把内容提交到单元格；同时记入该列历史。
+  // 选中某条候选：把完整文本填入当前单元格。
+  // 关键：Univer 的单元格编辑器是 Docs 富文本结构，直接改 editor.textContent 不一定进其内部模型，
+  // 因此单纯“改文本+派发合成 Enter”经常提交不进去（表现为“点了没填上”）。
+  // 可靠做法：① 先尽量把编辑器文本改为所选值并触发 input（让编辑器内部模型同步）；
+  // ② 执行 set-cell-edit-visible 关闭编辑器（编辑器会按当前内容提交一次）；
+  // ③ 兜底：无论编辑器提交结果如何，延迟用 worksheet.setValue 强制把单元格写成所选值（权威写入）。
+  // 这样即使富文本模型同步失败，单元格最终也一定是所选值，不会“点了没反应”。
   const acceptAc = (value: string) => {
     const editor = acEditorRef.current
     const st = acStateRef.current
-    if (!editor || !value) {
+    const col = st.col
+    const row = st.row
+    if (!value) {
       hideAc()
       return
     }
-    const col = st.col
-    acAcceptingRef.current = true
+    // 立即收起弹层，避免重复触发 / 编辑器关闭后再次弹出
+    hideAc()
+    const univerAPI = univerRef.current
+    if (editor) {
+      acAcceptingRef.current = true
+      try {
+        editor.focus()
+        editor.textContent = value
+        editor.dispatchEvent(new InputEvent('input', { bubbles: true }))
+      } catch {
+        /* noop */
+      } finally {
+        acAcceptingRef.current = false
+      }
+    }
+    // 关闭编辑器（按当前内容提交一次）
     try {
-      editor.focus()
-      editor.textContent = value
-      editor.dispatchEvent(new InputEvent('input', { bubbles: true }))
-    } finally {
-      acAcceptingRef.current = false
+      ;(univerAPI as unknown as { executeCommand: (id: string, p?: object) => unknown })
+        .executeCommand('sheet.operation.set-cell-edit-visible', { visible: false })
+    } catch {
+      /* noop */
+    }
+    // 兜底强制写入：编辑器关闭后再写一次，确保单元格一定是所选值
+    if (row > 0 && col >= 0) {
+      window.setTimeout(() => {
+        try {
+          const ws = univerRef.current?.getActiveSheet()?.worksheet
+          ws?.getRange(row, col).setValue(value)
+        } catch {
+          /* noop */
+        }
+      }, 60)
     }
     pushHistory(col, value)
-    hideAc()
-    // 派发 Enter 提交（捕获期我们的 keydown 监听器已因 open=false 提前返回，不会递归）
-    try {
-      editor.dispatchEvent(
-        new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true }),
-      )
-    } catch {
-      /* 某些环境不支持构造 KeyboardEvent，交由用户手动回车 */
-    }
   }
 
   // 关闭文件：若有未保存修改，先自动保存（不弹确认框），保存成功后再关闭；
@@ -603,7 +638,7 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
         return
       }
       acStateRef.current = { ...acStateRef.current, open: true, items, index: 0, col, row: ar.getRow(), partial }
-      setAcUi({ open: true, items, index: 0, rect: { left: rect.left, top: rect.top, bottom: rect.bottom } })
+      showAc(items, rect)
     }
 
     const onEditorKeydown = (e: KeyboardEvent) => {
@@ -681,8 +716,8 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
         </div>
       </div>
       <div ref={containerRef} className="univer-container" />
-      {acUi.open && acUi.rect && (
-        <div className="ac-popup" style={{ left: acUi.rect.left, top: acUi.rect.bottom + 2 }}>
+      {acUi.open && acUi.pos && (
+        <div className="ac-popup" style={{ left: acUi.pos.left, top: acUi.pos.top }}>
           {acUi.items.map((it, i) => (
             <div
               key={i}
