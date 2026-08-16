@@ -2151,5 +2151,41 @@ div[id^='univer-doc-selection-container-'] {
 .ac-item:hover {
   background: #e8f0fe;
 }
+/* Excel 式“框内灰色续接”：叠加在编辑器已输入文本之后的灰色后缀，纯展示、不拦截事件 */
+.ac-ghost {
+  position: fixed;
+  z-index: 1999;
+  display: none;
+  pointer-events: none;
+  color: #9aa0a6;
+  background: transparent;
+  white-space: nowrap;
+  overflow: hidden;
+  user-select: none;
+}
+/* 自动补全调试浮层：实时显示触发诊断（编辑器选择器/文本/激活格/候选数），用于定位“完全不提示”问题 */
+.ac-debug {
+  position: fixed;
+  left: 50%;
+  top: 6px;
+  transform: translateX(-50%);
+  z-index: 4000;
+  background: rgba(0, 0, 0, 0.88);
+  color: #6f6;
+  font: 12px/1.5 ui-monospace, Menlo, Consolas, monospace;
+  padding: 7px 12px;
+  border: 1px solid #6f6;
+  border-radius: 6px;
+  max-width: 96vw;
+  pointer-events: none;
+  white-space: pre-wrap;
+}
+.ac-debug::before {
+  content: '自动补全调试';
+  display: block;
+  color: #ffeb3b;
+  font-weight: 700;
+  margin-bottom: 2px;
+}
 
 

@@ -78,6 +78,13 @@ function serialToDateText(serial: number): string {
   return `${dt.getUTCFullYear()}-${pad(dt.getUTCMonth() + 1)}-${pad(dt.getUTCDate())}`
 }
 
+// 把 yyyy-mm-dd（或常见日期写法：2026/8/16、2026年8月16日、20260816 等）转成 Excel 日期序列号；
+// 无法解析返回 null。供自动补全在「日期列候选无论来源（序列号/手敲文本/识图文本）」统一写回真日期使用。
+export function dateStrToSerial(input: string): number | null {
+  const p = parseDateParts(input)
+  return p ? datePartsToSerial(p) : null
+}
+
 // 日期列的取值归一化：序列号 → yyyy-mm-dd；文本 → 各种写法归一化；非日期原样保留。
 // 这样无论 Univer 把“用户输入的日期”存成序列号还是文本，落盘到 Excel 的都是规整的 yyyy-mm-dd，
 // 而 Univer 编辑区也因列 numFmt='yyyy-mm-dd' 显示成日期而非数字。
