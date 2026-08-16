@@ -8,6 +8,11 @@ import type { AIRecognizedRow } from './types'
 // 保存时由 workbookDataToRows 剥离，再由 saveSheet 重新写入真正的表头。
 export const HEADER = ['序号', '日期', '货品名称', '单位', '数量', '单价', '金额', '调货人', '备注']
 export const COL_COUNT = HEADER.length
+
+// 列基础宽度（px）：作为「窗口最大化/缩放时列宽等比自适应铺满」的基准。
+// 实际显示宽度 = 基础宽度 × (可用宽度 / 基础宽度之和)，只在窗口 resize 时整体缩放，
+// 不改变单元格内容，也不写入 xlsx（saveSheet 只回写值、不回写列宽）。
+export const BASE_COL_WIDTHS = [56, 110, 200, 56, 64, 72, 80, 72, 120]
 const SHEET_ID = 'bill'
 // 日期列（第 2 列，0 基索引 1）的样式 id。该列在 Univer 里按 yyyy-mm-dd 显示，
 // 与 Excel 中 numFmt='yyyy-mm-dd' 保持一致 —— 这样编辑器里看到的就是打开 Excel 后看到的，所见即所得。
@@ -170,17 +175,11 @@ export function rowsToWorkbookData(rows: string[][]): Partial<IWorkbookData> {
     cellData: cellData as unknown as IWorksheetData['cellData'],
     // 列级默认样式：第 2 列（0 基索引 1）整体按 yyyy-mm-dd 显示，
     // 新输入/粘贴的日期也会套用该格式，不会变成数字。
-    columnData: {
-      1: { s: DATE_STYLE },
-      // 短内容列默认列宽调小（纯元数据，不影响渲染性能），把横向空间让给货品名称等宽列。
-      0: { w: 52 }, // 序号
-      3: { w: 50 }, // 单位
-      4: { w: 50 }, // 数量
-      5: { w: 56 }, // 单价
-      6: { w: 60 }, // 金额
-      7: { w: 56 }, // 调货人
-      8: { w: 90 }, // 备注
-    },
+    columnData: Object.fromEntries(
+      // 短内容列默认列宽调小（纯元数据，不影响渲染性能），把横向空间让给货品名称等宽列；
+      // 全部 9 列都显式给基础宽度，供 UniverSheet 在窗口 resize 时按可用宽度等比铺满。
+      BASE_COL_WIDTHS.map((w, c) => [c, c === 1 ? { w, s: DATE_STYLE } : { w }]),
+    ),
     // 冻结首行（表头）：ySplit=1 固定第 0 行，startRow=1 为可滚动区起点，
     // 滚动时表头始终停留在顶部（xSplit=0 不冻结列）。
     freeze: { xSplit: 0, ySplit: 1, startRow: 1, startColumn: 0 },

@@ -13,6 +13,7 @@ import {
   recomputeAmount,
   onAmountChanged,
   COL_COUNT,
+  BASE_COL_WIDTHS,
 } from '../univerAdapter'
 
 type UniverAPI = ReturnType<typeof createUniver>['univerAPI']
@@ -51,6 +52,10 @@ const SHEET_STRUCT_MUTATION_KEYWORDS = [
   'insert-range-move',
   'move-range',
 ]
+
+// 列宽等比自适应时，从容器宽度中扣除的左侧行号表头 + 右侧滚动条占位的估算值（px）。
+// 略大于实际占位，宁可右侧留一点缝隙，也不让列总宽超过可视区导致出现横向滚动条。
+const COL_WIDTH_GUTTER = 64
 
 function setActiveAndScroll(
   univerAPI: UniverAPI,
@@ -112,12 +117,37 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
   const [saving, setSaving] = useState(false)
   const [dirty, setDirty] = useState(false)
   const [reloadToken, setReloadToken] = useState(0)
+  // 窗口 resize 防抖用的 requestAnimationFrame 句柄
+  const resizeRafRef = useRef<number | null>(null)
 
   const markDirty = () => {
     if (!dirtyRef.current) {
       dirtyRef.current = true
       setDirty(true)
     }
+  }
+
+  // 列宽等比自适应：按容器可用宽度缩放各列，使编辑区在最大化/缩放窗口时铺满，不留右侧空白。
+  // 不改变单元格内容，也不写入 xlsx（saveSheet 只回写值、不回写列宽）。
+  const applyProportionalColumnWidths = () => {
+    const univerAPI = univerRef.current
+    const container = containerRef.current
+    if (!univerAPI || !container) return
+    const fws = univerAPI.getActiveSheet()?.worksheet
+    if (!fws) return
+    const avail = container.clientWidth - COL_WIDTH_GUTTER
+    if (avail <= 0) return
+    const sumBase = BASE_COL_WIDTHS.reduce((a, b) => a + b, 0) || 1
+    let scale = avail / sumBase
+    // 限制缩放范围，避免极小/极大窗口下单元格过窄或过宽
+    scale = Math.max(0.5, Math.min(scale, 2.5))
+    BASE_COL_WIDTHS.forEach((w, i) => {
+      try {
+        fws.setColumnWidth(i, Math.max(24, Math.round(w * scale)))
+      } catch {
+        /* 单行失败不影响其他 */
+      }
+    })
   }
 
   // 保存：取回 Univer 数据 → 还原为 string[][] → 交给 ExcelJS 写回（保留全部既有约定）
@@ -202,6 +232,16 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
       }
     })
 
+    // 窗口尺寸变化（含最大化）时，列宽等比自适应铺满，不留右侧空白。
+    const onResize = () => {
+      if (resizeRafRef.current != null) cancelAnimationFrame(resizeRafRef.current)
+      resizeRafRef.current = requestAnimationFrame(() => {
+        resizeRafRef.current = null
+        applyProportionalColumnWidths()
+      })
+    }
+    window.addEventListener('resize', onResize)
+
     // 编辑即标记脏；数量/单价变化自动重算金额（自动金额行），
     // 金额列被编辑时按“是否==数量×单价”重分类该行（手工金额不被覆盖）。
     const disp = univerAPI.addEvent(univerAPI.Event.SheetValueChanged, (e: unknown) => {
@@ -246,6 +286,8 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
         // 并滚动到该行，同时多留末尾几行真实数据在视野内（END_VISIBLE_LEAD）
         const r = Math.max(1, Math.min(res.rows.length + 1, 100000))
         setActiveAndScroll(univerAPI, r, 0, { leadRows: END_VISIBLE_LEAD })
+        // 打开即用当前窗口宽度做列宽等比铺满（render 就绪后再设列宽，避免时机过早）
+        requestAnimationFrame(() => applyProportionalColumnWidths())
       } catch (e) {
         if (!disposed) setStatus('打开失败：' + (e instanceof Error ? e.message : '未知错误'))
       }
@@ -253,6 +295,8 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
 
     return () => {
       disposed = true
+      window.removeEventListener('resize', onResize)
+      if (resizeRafRef.current != null) cancelAnimationFrame(resizeRafRef.current)
       try {
         disp.dispose()
       } catch {
