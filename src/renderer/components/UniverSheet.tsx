@@ -137,8 +137,15 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
   const saveRef = useRef(handleSave)
   saveRef.current = handleSave
 
-  const handleClose = () => {
-    if (dirtyRef.current && !window.confirm('有未保存的修改，确定关闭吗？')) return
+  // 关闭文件：若有未保存修改，先自动保存（不弹确认框），保存成功后再关闭；
+  // 若保存失败则保持面板打开，避免静默丢数据。
+  const handleClose = async () => {
+    if (dirtyRef.current) {
+      setStatus('正在自动保存…')
+      await handleSave()
+      // 保存失败（dirty 仍为 true）时保持面板打开，让用户看到错误并重试
+      if (dirtyRef.current) return
+    }
     onClose()
   }
 
