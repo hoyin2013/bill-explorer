@@ -57,6 +57,11 @@ const SHEET_STRUCT_MUTATION_KEYWORDS = [
 // 略大于实际占位，宁可右侧留一点缝隙，也不让列总宽超过可视区导致出现横向滚动条。
 const COL_WIDTH_GUTTER = 64
 
+// 连续自动保存：任何改动（单元格编辑 / 删插行 / OCR 填入）后，延时 AUTOSAVE_DELAY 毫秒
+// （防抖，用户停顿后再写盘）自动整表存盘，无需手动保存或关闭文件。
+// 这样边录边存，输完一张即可继续下一张，且大幅降低意外丢失风险。
+const AUTOSAVE_DELAY = 1000
+
 function setActiveAndScroll(
   univerAPI: UniverAPI,
   row: number,
@@ -119,6 +124,13 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
   const [reloadToken, setReloadToken] = useState(0)
   // 窗口 resize 防抖用的 requestAnimationFrame 句柄
   const resizeRafRef = useRef<number | null>(null)
+  // 连续自动保存相关句柄/锁：
+  // - autoSaveTimerRef：防抖定时器，改动后延时 AUTOSAVE_DELAY 再写盘
+  // - savingRef：是否正在保存（用 ref 而非 state，避免并发闭包读到旧值）
+  // - pendingSaveRef：保存中又来了新改动，则保存完再补一次
+  const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const savingRef = useRef(false)
+  const pendingSaveRef = useRef(false)
 
   const markDirty = () => {
     if (!dirtyRef.current) {
@@ -151,13 +163,19 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
   }
 
   // 保存：取回 Univer 数据 → 还原为 string[][] → 交给 ExcelJS 写回（保留全部既有约定）
-  const handleSave = async () => {
-    if (saving) return
-    const univerAPI = univerRef.current
-    if (!univerAPI) return
+  // auto=true 表示由“连续自动保存”触发，状态文案与手动保存区分，并支持保存中重叠保护。
+  const handleSave = async (auto = false) => {
+    // 正在保存中：标记待补一次，立即返回（避免并发写盘）
+    if (savingRef.current) {
+      pendingSaveRef.current = true
+      return
+    }
+    savingRef.current = true
     setSaving(true)
-    setStatus('')
+    setStatus(auto ? '自动保存中…' : '')
     try {
+      const univerAPI = univerRef.current
+      if (!univerAPI) throw new Error('未获取到工作簿')
       const wb = univerAPI.getActiveWorkbook()?.getSnapshot()
       if (!wb) throw new Error('未获取到工作簿')
       let rows = workbookDataToRows(wb)
@@ -169,21 +187,42 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
       } else {
         dirtyRef.current = false
         setDirty(false)
-        setStatus(res.message || '已保存')
+        setStatus(auto ? '已自动保存' : (res.message || '已保存'))
         onSaved()
       }
     } catch (err) {
       setStatus('保存失败：' + (err instanceof Error ? err.message : '未知错误'))
     } finally {
+      savingRef.current = false
       setSaving(false)
+      // 保存期间又发生了改动 → 再补一次存盘，确保最终一致
+      if (pendingSaveRef.current) {
+        pendingSaveRef.current = false
+        void handleSave(auto)
+      }
     }
   }
   const saveRef = useRef(handleSave)
   saveRef.current = handleSave
 
+  // 连续自动保存（防抖）：任意改动后，等 AUTOSAVE_DELAY 毫秒用户停手再写盘。
+  // 这样既“边录边存”，又不会每次按键都触发一次全表存盘（大文件代价高）。
+  const scheduleAutoSave = () => {
+    if (autoSaveTimerRef.current) clearTimeout(autoSaveTimerRef.current)
+    autoSaveTimerRef.current = setTimeout(() => {
+      autoSaveTimerRef.current = null
+      void saveRef.current(true)
+    }, AUTOSAVE_DELAY)
+  }
+
   // 关闭文件：若有未保存修改，先自动保存（不弹确认框），保存成功后再关闭；
   // 若保存失败则保持面板打开，避免静默丢数据。
   const handleClose = async () => {
+    // 关闭前先取消待触发的自动保存定时器，避免卸载后再尝试写盘
+    if (autoSaveTimerRef.current != null) {
+      clearTimeout(autoSaveTimerRef.current)
+      autoSaveTimerRef.current = null
+    }
     if (dirtyRef.current) {
       setStatus('正在自动保存…')
       await handleSave()
@@ -221,7 +260,7 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
     univerRef.current = univerAPI
 
     // 结构性变更（删/插行、列、区域移动等）不一定触发 SheetValueChanged，
-    // 但会改变数据，必须标记为“有修改”以便关闭时自动保存。
+    // 但会改变数据，必须标记为“有修改”并触发自动保存。
     const dispCmd = univerAPI.addEvent(univerAPI.Event.CommandExecuted, (e: unknown) => {
       const ev = e as { id?: string }
       if (
@@ -229,6 +268,7 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
         SHEET_STRUCT_MUTATION_KEYWORDS.some((k) => ev.id!.includes(k))
       ) {
         markDirty()
+        scheduleAutoSave()
       }
     })
 
@@ -246,6 +286,7 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
     // 金额列被编辑时按“是否==数量×单价”重分类该行（手工金额不被覆盖）。
     const disp = univerAPI.addEvent(univerAPI.Event.SheetValueChanged, (e: unknown) => {
       markDirty()
+      scheduleAutoSave()
       const ev = e as { effectedRanges?: Array<{ getRange: () => { startRow: number; endRow: number; startColumn: number; endColumn: number } }> }
       const ranges = ev?.effectedRanges
       if (!Array.isArray(ranges) || !ranges.length) return
@@ -297,6 +338,11 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
       disposed = true
       window.removeEventListener('resize', onResize)
       if (resizeRafRef.current != null) cancelAnimationFrame(resizeRafRef.current)
+      // 组件卸载时取消待触发的自动保存定时器
+      if (autoSaveTimerRef.current != null) {
+        clearTimeout(autoSaveTimerRef.current)
+        autoSaveTimerRef.current = null
+      }
       try {
         disp.dispose()
       } catch {
@@ -372,6 +418,7 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
         return
       }
       markDirty()
+      scheduleAutoSave()
       setStatus(`已填入 ${matrix.length} 行识别结果`)
     })
     return () => off()
