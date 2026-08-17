@@ -29,6 +29,9 @@
 - **金额列 = 数量×单价，支持「手工金额」**：`univerAdapter.ts` 纯函数 `classifyAmount`(auto/pending/manual)、`buildAutoAmountRows`、`recomputeAmount`(数量>0&单价>0 时：row 在 autoRows 集合或金额 pending→写 `q*p`；手工金额不覆盖)、`onAmountChanged`(金额被编辑时按当前值==乘积重分类)。`UniverSheet.tsx` 加载后 `autoAmountRows.current=buildAutoAmountRows(...)`；`SheetValueChanged`：数量/单价变→`recomputeAmount`、金额变→`onAmountChanged`；OCR 填入后数量单价为正的行加入集合。**铁律：`recomputeAmount` 用 autoRows 集合判定，绝不能用「当前金额==乘积」判断**（改数量时旧金额≠新乘积会被误判手工行而不更新——真实 bug）。
 - **金额读取铁律**：`loadSheet.cellToText` 对公式单元格**优先返回 Excel 缓存 `result`**（无缓存才退回公式串），编辑框与 Excel 一致、不重算成 0。存盘金额走普通数值；数量/单价/金额须数值化。OCR 金额留空、由监听自动算 `q*p`。
 - **金额列禁止千分位逗号**：`saveSheet` 给数量/单价/金额设 `numFmt='General'`（非 `'#,##0'`），否则 Excel 显示 `1,000` 与编辑界面不一致。
+- **自动补全候选聚合铁律**：`extractColumnValues`(src/renderer/lib/autocomplete.ts) **按 row 展开**（同名值每行各贡献一条），不要 `Math.max(prev.row, r)` 聚合 row 上界——会上方/下方同名值聚合到下方、然后被 `row<currentRow` filter 误过滤掉，导致"敲了字也看不到候选"（真实历史 bug，e2e 已复现）。排序由 `computeSuggestions` 在 row<currentRow filter 之后二次按 display 聚合时取 max(row) + 累加 freq（这层聚合安全）。
+- **自动补全回填铁律（Univer 0.25.1）**：事件驱动（`IEditorBridgeService.currentEditCell$` + `IEditorService.getEditor(id).input$`），**回填唯一可靠注入点 = `commandService.beforeCommandExecuted` 拦截 `SetRangeValuesCommand`，改其 `params.value` 为候选（带正确 `CellValueType`）**；落盘由 Univer 用 `editCellState` 正确 row 完成。三坑：`currentEditCell$.row` +1 偏移、`replaceText` 快照时序、Univer 的 `window` 捕获 keydown 早于本控制器。键盘/鼠标两条路径都靠「先 `armAccept` 设 `pendingAccept` → 再拦截 `SetRangeValuesCommand` 换值」，`endEdit` 不得清空 `pendingAccept`（拦截器在 endEdit 之后才消费）。详见技能 `univer-autocomplete`。
+- **自动补全挂载时机铁律**：`attachAutocomplete` 必须放在 `createWorkbook` **之后**——`IEditorBridgeService` 要等首个工作表实例化才完成 DI 注册，提前挂载会 `injector.get` 抛「…but get 0」并被静默降级为 noop，表现为「输入过程完全不提示」（真实 bug）。诊断：控制台 `[AC] 注入编辑服务失败…but get 0`。
 
 ## 识图：检测 vs 内容识别 两套链路
 - **检测（框票）**走本地 ONNX：`models/ticket_detect.onnx` + `scripts/detect_onnx.cjs` + `onnxruntime-node`（原生模块，平台相关，随 app 拷贝走→换机器通常仍可用）。

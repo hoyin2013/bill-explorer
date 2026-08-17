@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <title>自动补全 · 真实 Univer 端到端测试</title>
+  <style>
+    html, body { margin: 0; padding: 0; font-family: -apple-system, "PingFang SC", sans-serif; }
+    #univer-container { position: relative; width: 100vw; height: 72vh; }
+    #status {
+      position: fixed; top: 8px; right: 8px; z-index: 10000;
+      background: rgba(0,0,0,.82); color: #4f8; padding: 6px 10px;
+      font: 12px/1.4 monospace; white-space: pre; border-radius: 6px; max-width: 46vw;
+    }
+    #ac-popup {
+      position: absolute; z-index: 9999; display: none;
+      background: #fff; border: 1px solid #d0d7de; border-radius: 6px;
+      box-shadow: 0 6px 18px rgba(0,0,0,.18); font-size: 13px; overflow: hidden;
+    }
+    .ac-item { padding: 5px 12px; cursor: pointer; white-space: nowrap; }
+    .ac-item.ac-active, .ac-item:hover { background: #e8f0fe; }
+  </style>
+</head>
+<body>
+  <div id="status">init…</div>
+  <div id="univer-container"></div>
+  <div id="ac-popup"></div>
+
+  <script type="module">
+    import { createUniver, LocaleType } from '@univerjs/presets'
+    import { UniverSheetsCorePreset } from '@univerjs/preset-sheets-core'
+    import UniverPresetSheetsCoreZhCN from '@univerjs/preset-sheets-core/locales/zh-CN'
+    import '@univerjs/preset-sheets-core/lib/index.css'
+    import { attachAutocomplete } from '/src/renderer/lib/acController.ts'
+    import { computeSuggestions, extractColumnValues } from '/src/renderer/lib/autocomplete.ts'
+    import { rowsToWorkbookData } from '/src/renderer/univerAdapter.ts'
+    import { IEditorBridgeService } from '@univerjs/sheets-ui'
+    import { IEditorService } from '@univerjs/docs-ui'
+
+    const statusEl = document.getElementById('status')
+    const log = []
+    const setStatus = () => { statusEl.textContent = log.join('\n') }
+    const logline = (s) => { log.push(s); setStatus() }
+
+    const HEADER = ['序号', '日期', '货品名称', '单位', '数量', '单价', '金额', '调货人', '备注']
+    const COL_COUNT = HEADER.length
+    const DATE_COL = 1
+    const GOODS_COL = 2
+
+    const pad = (n) => String(n).padStart(2, '0')
+    const serialToStr = (s) => { const d = new Date((s - 25569) * 86400000); return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}` }
+    const strToSerial = (s) => { const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(s); if (!m) return null; const base = Date.UTC(1899, 11, 30); return (Date.UTC(+m[1], +m[2] - 1, +m[3]) - base) / 86400000 }
+
+    const buildDataRows = () => {
+      const goods = ['苹果', '苹果汁', '苹果梨', '香蕉', '橙子', '西瓜', '葡萄', '苹果干', '芒果', '火龙果']
+      const rows = []
+      for (let i = 0; i < goods.length; i++) {
+        rows.push([String(i + 1), `2026-08-${pad(i + 1)}`, goods[i], '斤', String((i + 1) * 2), '3', '', '张三', '备注' + i])
+      }
+      return rows
+    }
+
+    // 计算候选：直接复用生产代码 autocomplete.ts 的 computeSuggestions（含日期列序列号<->文本转换），
+    // 以便端到端验证的是真实算法，而非测试页自带的简化副本。
+    let apiRef = null
+    const computeItems = (partial, col, currentRow) => {
+      const wb = apiRef && apiRef.getActiveWorkbook() ? apiRef.getActiveWorkbook().getSnapshot() : null
+      const colVals = extractColumnValues(wb, col)
+      return computeSuggestions(partial, col, currentRow, colVals, [])
+    }
+
+    const container = document.getElementById('univer-container')
+    const popup = document.getElementById('ac-popup')
+    let controller = null
+
+    const render = (s) => {
+      window.__ac = s
+      window.__render = render // exposed for diagnostics
+      if (s.open && s.pos && s.items.length) {
+        popup.style.display = 'block'
+        popup.style.left = s.pos.left + 'px'
+        popup.style.top = s.pos.top + 'px'
+        popup.style.minWidth = (s.pos.width || 120) + 'px'
+        popup.innerHTML = s.items.map((it, i) =>
+          `<div class="ac-item${i === s.index ? ' ac-active' : ''}" data-index="${i}">${it.display}</div>`).join('')
+        // 弹层容器：吞掉 mousedown/click，绝不漏到 Univer 画布。
+        popup.onmousedown = (e) => e.stopPropagation()
+        popup.onclick = (e) => e.stopPropagation()
+        popup.querySelectorAll('.ac-item').forEach((el) => {
+          // 关键：accept 放在 click 触发（而非 mousedown）。若 mousedown 就 accept+关弹层，
+          // 弹层会在整段手势中途被移除，随后的 mouseup/click 落到画布，Univer 误判为
+          // “点到某格 → 重新进入编辑”，currentEditCell$ 再次触发、弹层重开（要点两次才消失）。
+          // 改为 click 触发后，弹层陪完整个手势，click 始终落在弹层内被吞掉，画布收不到事件。
+          el.addEventListener('click', (e) => {
+            e.preventDefault()
+            e.stopPropagation()
+            const idx = Number(el.dataset.index)
+            controller && controller.accept(s.items[idx])
+          })
+        })
+      } else {
+        popup.style.display = 'none'
+        popup.innerHTML = ''
+      }
+    }
+
+    ;(async () => {
+      try {
+        const { univer, univerAPI } = createUniver({
+          locale: LocaleType.ZH_CN,
+          locales: { [LocaleType.ZH_CN]: UniverPresetSheetsCoreZhCN },
+          presets: [UniverSheetsCorePreset({ container })],
+        })
+        apiRef = univerAPI
+        window.__univer = univer
+        window.__univerAPI = univerAPI
+
+        const rows = buildDataRows()
+        const data = rowsToWorkbookData(rows)
+        univerAPI.createWorkbook(data)
+        // 不做远端滚动：保持视图在顶部（scroll=0, zoom=1），
+        // 这样 getCellRect() 的 sheet 坐标可 1:1 映射到 canvas 像素，方便 e2e 双击定位。
+
+        const host = {
+          computeItems: (t, col, row) => computeItems(t, col, row),
+          // 新设计：单元格落盘由 Univer 原生提交完成（acController 在 SetRangeValuesCommand 前换值），
+          // 此处仅占位——断言直接读 Univer 单元格，故无需再写一次。
+          commit: (item, col) => { /* 历史/写盘均交由 Univer，本测试只读单元格验证 */ },
+          render,
+          container,
+          univerAPI,
+        }
+        controller = attachAutocomplete(univer, host)
+        window.__controller = controller
+
+        // 暴露给 puppeteer 的驱动接口：返回某单元格在页面中的中心坐标（用于真实双击进入编辑）。
+        // 视图保持在顶部（scroll=0, zoom=1）时，getCellRect 的 sheet 坐标可 1:1 映射为 canvas 像素。
+        window.__cellScreenPos = (row, col) => {
+          const fws = univerAPI.getActiveSheet().worksheet
+          const range = fws.getRange(row, col)
+          const rect = range.getCellRect()
+          const canvases = [...container.querySelectorAll('canvas')]
+          let canvas = canvases[0]
+          let area = -1
+          for (const c of canvases) {
+            const r = c.getBoundingClientRect()
+            const a = r.width * r.height
+            if (a > area) { area = a; canvas = c }
+          }
+          const cr = canvas.getBoundingClientRect()
+          return {
+            x: cr.left + rect.left + rect.width / 2,
+            y: cr.top + rect.top + rect.height / 2,
+            cell: { l: rect.left, t: rect.top, w: rect.width, h: rect.height },
+            canvas: { l: cr.left, t: cr.top, w: cr.width, h: cr.height },
+          }
+        }
+        window.__getCell = (row, col) => {
+          try { return univerAPI.getActiveSheet().worksheet.getRange(row, col).getValue() } catch (e) { return '<err:' + e.message + '>' }
+        }
+        window.__ready = true
+
+        // ===== 调试钩子：用于确定「鼠标路径」最可靠的关闭+提交机制 =====
+        try {
+          const injector = univer.__getInjector()
+          const bridge = injector.get(IEditorBridgeService)
+          const eds = injector.get(IEditorService)
+          window.__acDebug = {
+            getCell: (r, c) => window.__getCell(r, c),
+            replaceText: (t) => {
+              const e = eds.getEditor(bridge.getCurrentEditorId())
+              if (e && typeof e.replaceText === 'function') { e.replaceText(t); return true }
+              return false
+            },
+            getEditorId: () => bridge.getCurrentEditorId(),
+            isEditing: () => !!(bridge.isVisible() && bridge.isVisible().visible),
+            closeByCmd: (visible, keycode, eventType = 2) => {
+              return univerAPI.executeCommand('sheet.operation.set-cell-edit-visible', { visible, keycode, eventType })
+            },
+            dispatchEnter: () => {
+              const els = [...document.querySelectorAll("[data-u-comp='editor']")].filter((e) => e.getBoundingClientRect().height > 1)
+              const t = (document.activeElement && document.activeElement.dispatchEvent) ? document.activeElement : (els[0] || document.body)
+              const ev = new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true })
+              try { Object.defineProperty(ev, 'keyCode', { get: () => 13 }); Object.defineProperty(ev, 'which', { get: () => 13 }) } catch {}
+              return t.dispatchEvent(ev)
+            },
+            dispatchEsc: () => {
+              const els = [...document.querySelectorAll("[data-u-comp='editor']")].filter((e) => e.getBoundingClientRect().height > 1)
+              const t = (document.activeElement && document.activeElement.dispatchEvent) ? document.activeElement : (els[0] || document.body)
+              const ev = new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', keyCode: 27, which: 27, bubbles: true, cancelable: true })
+              try { Object.defineProperty(ev, 'keyCode', { get: () => 27 }); Object.defineProperty(ev, 'which', { get: () => 27 }) } catch {}
+              return t.dispatchEvent(ev)
+            },
+          }
+          logline('debug hooks ready')
+        } catch (e) { logline('debug hook err ' + e.message) }
+
+        logline('ready; dataRows=' + rows.length)
+      } catch (e) {
+        logline('FATAL ' + (e && e.message ? e.message : e))
+      }
+    })()
+  </script>
+</body>
+</html>

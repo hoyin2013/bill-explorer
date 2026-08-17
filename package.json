@@ -4,6 +4,8 @@
   "private": true,
   "main": "dist-electron/main.js",
   "scripts": {
+    "build:autocomplete": "esbuild src/renderer/lib/autocomplete.ts --bundle --platform=node --format=esm --outfile=dist-autocomplete/autocomplete.mjs",
+    "test:ac": "npm run build:autocomplete && node --test test-autocomplete.mjs",
     "dev": "vite",
     "build:renderer": "tsc && vite build",
     "build:main": "esbuild src/main/main.ts --bundle --platform=node --external:electron --external:onnxruntime-node --external:jpeg-js --format=cjs --outfile=dist-electron/main.js",
@@ -20,8 +22,10 @@
     "start": "vite --host"
   },
   "dependencies": {
+    "@univerjs/docs-ui": "0.25.1",
     "@univerjs/preset-sheets-core": "^0.25.1",
     "@univerjs/presets": "^0.25.1",
+    "@univerjs/sheets-ui": "0.25.1",
     "electron-store": "^8.2.0",
     "exceljs": "^4.4.0",
     "heic-convert": "^2.1.0",

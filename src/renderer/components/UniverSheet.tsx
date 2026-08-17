@@ -17,6 +17,11 @@ import {
   BASE_COL_WIDTHS,
   HEADER,
 } from '../univerAdapter'
+import { extractColumnValues, type AcItem } from '../lib/autocomplete'
+// 单元格输入记忆（自动补全）控制器：基于 Univer 官方「编辑桥接服务」事件驱动，
+// 彻底替代此前每帧 querySelector 轮询 DOM 编辑器（被公式栏占位壳反复坑的脆弱方案）。
+// 控制器逻辑见 src/renderer/lib/acController.ts，本组件只提供「候选算法 / 写入 / 渲染」三件套。
+import { attachAutocomplete, type AcController } from '../lib/acController'
 
 type UniverAPI = ReturnType<typeof createUniver>['univerAPI']
 
@@ -71,9 +76,6 @@ const AUTOSAVE_DELAY = 1000
 const AC_MAX_SUGGESTIONS = 12
 const AC_HISTORY_CAP = 200
 const AC_HISTORY_PREFIX = 'bill-ac-history::'
-// 临时调试开关：开启后左下角 HUD 实时显示自动补全的触发诊断（编辑器选择器/读到的文本/激活格/本列值数/候选数）。
-// 用于定位“完全不提示”的环境问题；确认修复后改为 false。
-const AC_DEBUG = true
 // 日期列（第 2 列，0 基索引 1）：候选需把 Excel 序列号格式化为可读日期展示；
 // 选中时再写回序列号，确保单元格仍是“真日期”（带日期样式），而不是变成文本。
 const DATE_COL_INDEX = 1
@@ -87,8 +89,7 @@ const excelSerialToDateStr = (serial: number): string => {
   return `${y}-${m}-${day}`
 }
 // 自动补全候选：display=展示文本（日期列已格式化为日期），raw=写入单元格的真实值
-// （日期列=Excel 序列号，保证仍为真日期；其余列=原文本）。
-type AcItem = { display: string; raw: string | number }
+// （日期列=Excel 序列号，保证仍为真日期；其余列=原文本）。类型统一复用 lib/autocomplete.ts 的 AcItem。
 
 function setActiveAndScroll(
   univerAPI: UniverAPI,
@@ -139,6 +140,8 @@ function setActiveAndScroll(
 export function UniverSheet({ file, api, onClose, onSaved }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const univerRef = useRef<UniverAPI | null>(null)
+  // createUniver 同时返回 Univer 实例；自动补全控制器经其注入器取出官方编辑服务（见 acController.ts）。
+  const univerInstRef = useRef<any>(null)
   const dirtyRef = useRef(false)
   const fileRef = useRef(file)
   fileRef.current = file
@@ -159,35 +162,15 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const savingRef = useRef(false)
   const pendingSaveRef = useRef(false)
-  // 单元格输入记忆（自动补全）相关：
-  // - acEditorRef：当前正在编辑的单元格编辑器 DOM（contentEditable[data-u-comp='editor']）
-  // - acStateRef：弹出状态机的可变数据（避免打字时频繁 setState 引起重渲染）；items 为候选
-  // - acAcceptingRef：正在“选中并填充”的过程中，避免程序化 input 事件被自身监听器误处理
-  // - acUi：仅供渲染弹层的快照（open/items/index/定位）
-  const acEditorRef = useRef<HTMLElement | null>(null)
-  const acAcceptingRef = useRef(false)
-  const acRafRef = useRef<number | null>(null)
-  const acGhostRef = useRef<HTMLDivElement | null>(null)
-  const acMeasureRef = useRef<HTMLSpanElement | null>(null)
-  const acDebugRef = useRef<HTMLDivElement | null>(null)
-  const acStateRef = useRef<{
-    open: boolean
-    items: AcItem[]
-    index: number
-    col: number
-    row: number
-    partial: string
-  }>({ open: false, items: [], index: 0, col: -1, row: -1, partial: '' })
-  // 轮询去重键：col:row:text，仅在“文本或所在单元格变化”时才重算候选，避免每帧重复计算
-  const acLastKeyRef = useRef('')
-  // 编辑时 Univer 的 getActiveRange() 经常返回 null（编辑器接管了选区），
-  // 故在非编辑态时记住“最近一次激活单元格”，编辑态拿不到 range 就回退用它，确保仍知道在哪列输入。
-  const acLastCellRef = useRef<{ col: number; row: number } | null>(null)
+  // 单元格输入记忆（自动补全）相关状态：
+  // - acRef：attachAutocomplete 返回的控制器实例（暴露 setIndex / accept 给鼠标交互，dispose 在卸载时调用）
+  // - acUi：仅供渲染弹层的快照（open/items/index/定位 rect）；状态机在控制器内维护，避免打字时频繁重渲染
+  const acRef = useRef<AcController | null>(null)
   const [acUi, setAcUi] = useState<{
     open: boolean
     items: AcItem[]
     index: number
-    pos: { left: number; top: number } | null
+    pos: { left: number; top: number; width: number } | null
   }>({ open: false, items: [], index: 0, pos: null })
 
   const markDirty = () => {
@@ -299,39 +282,16 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
       /* 配额/隐私模式下静默忽略 */
     }
   }
-  // 读取当前工作表某一列里出现过的所有（去重、非空）值，附带来源行号与出现次数，
-  // 作为“本列曾经内容”的候选源。行号用于「就近（上方最近）优先」排序；次数用于频率排序。
-  // 值保留原始类型（日期列存的是 Excel 序列号 → number，其它列是 string），便于候选格式化。
+  // 读取当前工作表某一列里出现过的所有值。同名值在多处出现时每个 row 都贡献一条候选，
+  // 避免聚合时 max(row) 把同名值的 row 推高、然后被 row<currentRow filter 误过滤掉
+  // （这正是历史上 "敲字但不弹" 的真实根因之一 —— 算法 bug，e2e 测试已复现并修复）。
+  // 见 src/renderer/lib/autocomplete.ts 的 extractColumnValues 单元测试。
   const getColumnValuesWithRows = (col: number): Array<{ value: string | number; row: number; freq: number }> => {
     const univerAPI = univerRef.current
     const wb = univerAPI?.getActiveWorkbook()?.getSnapshot()
-    const sheets = wb?.sheets as Record<string, { cellData?: Record<number, Record<number, { v?: unknown }>> }> | undefined
-    const sheet = sheets ? (sheets['bill'] ?? Object.values(sheets)[0]) : undefined
-    const cd = sheet?.cellData
-    if (!cd) return []
-    const map = new Map<string, { row: number; freq: number }>()
-    for (const r of Object.keys(cd)) {
-      const cell = cd[Number(r)]?.[col]
-      if (cell && cell.v != null) {
-        const s = String(cell.v).trim()
-        if (s) {
-          const prev = map.get(s)
-          if (prev) {
-            prev.freq += 1
-            prev.row = Math.max(prev.row, Number(r))
-          } else {
-            map.set(s, { row: Number(r), freq: 1 })
-          }
-        }
-      }
-    }
-    return [...map.entries()].map(([value, info]) => {
-      // 注意：cellNumOf 对文本返回 null，而 Number(null) === 0（非 null），
-      // 故不能直接 Number(cellNumOf(value))，否则所有文本值都会被错归一成 0，
-      // 导致候选匹配全部失败（表现为“什么都不提示”）。只在确为数字时转 number。
-      const num = cellNumOf(value)
-      return { value: num != null ? num : value, ...info }
-    })
+    if (!wb) return []
+    // 直接复用 lib 模块的纯函数（已通过 10 个单元测试 + e2e 验证）
+    return extractColumnValues(wb, col, 'bill')
   }
   // value 可能是 number 或 string；这里只做“字符串→数字”的轻量归一（用于日期列序列号识别）。
   const cellNumOf = (v: string | number): number | null => {
@@ -404,137 +364,15 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
     })
     return matched.slice(0, AC_MAX_SUGGESTIONS)
   }
-  // 根据编辑框位置计算弹层坐标：默认在编辑框下方；若下方空间不足（单元格靠近窗口底部），
-  // 则翻到编辑框上方，避免弹层被裁掉导致「内容不全 / 只能点到前面几条」。
-  const computeAcPos = (editorRect: DOMRect, itemsCount: number): { left: number; top: number } => {
-    const estH = Math.min(220, itemsCount * 29 + 10)
-    const vh = window.innerHeight || 600
-    const belowTop = editorRect.bottom + 2
-    const aboveTop = editorRect.top - estH - 2
-    let top = belowTop
-    if (belowTop + estH > vh - 8 && aboveTop > 8) top = aboveTop
-    top = Math.max(8, Math.min(top, vh - estH - 8))
-    return { left: editorRect.left, top }
-  }
-  const showAc = (items: AcItem[], rect: DOMRect) => {
-    const pos = computeAcPos(rect, items.length)
-    acStateRef.current = { ...acStateRef.current, open: true, items, index: 0 }
-    setAcUi({ open: true, items, index: 0, pos })
-  }
-  const hideAc = () => {
-    if (!acStateRef.current.open && !acUi.open) return
-    acStateRef.current = { ...acStateRef.current, open: false, items: [], index: 0 }
-    setAcUi({ open: false, items: [], index: 0, pos: null })
-    // 同时收起“框内灰色续接”提示
-    if (acGhostRef.current) acGhostRef.current.style.display = 'none'
-  }
-  // 渲染 Excel 式“框内灰色续接”：在编辑器内已输入文本之后，用灰色叠加显示
-  // 最佳匹配（以已输入内容开头）的剩余后缀，作为视觉提示。纯展示，不改变实际输入；
-  // 接受动作仍由下拉候选（Enter/Tab/点击）完成，故不破坏现有下拉行为。
-  const updateGhost = (partial: string, items: AcItem[], editor: HTMLElement) => {
-    const ghost = acGhostRef.current
-    if (!ghost) return
-    const p = partial.trim().toLowerCase()
-    const match = items.find((it) => it.display.toLowerCase().startsWith(p))
-    if (!match || !p) {
-      ghost.style.display = 'none'
-      return
-    }
-    const suffix = match.display.slice(p.length)
-    if (!suffix) {
-      ghost.style.display = 'none'
-      return
-    }
-    const cs = getComputedStyle(editor)
-    // 用与编辑器同字体的隐藏量测 span，测“已输入文本”像素宽度，定位灰色后缀起点
-    let measure = acMeasureRef.current
-    if (!measure) {
-      measure = document.createElement('span')
-      measure.style.position = 'absolute'
-      measure.style.visibility = 'hidden'
-      measure.style.whiteSpace = 'nowrap'
-      measure.style.top = '-9999px'
-      measure.style.left = '-9999px'
-      document.body.appendChild(measure)
-      acMeasureRef.current = measure
-    }
-    measure.style.font = cs.font
-    measure.style.fontSize = cs.fontSize
-    measure.style.fontFamily = cs.fontFamily
-    measure.style.fontWeight = cs.fontWeight
-    measure.style.letterSpacing = cs.letterSpacing
-    measure.textContent = partial
-    const w = measure.offsetWidth
-    const padLeft = parseFloat(cs.paddingLeft) || 0
-    const rect = editor.getBoundingClientRect()
-    ghost.textContent = suffix
-    ghost.style.display = 'block'
-    ghost.style.left = `${rect.left + padLeft + w}px`
-    ghost.style.top = `${rect.top}px`
-    ghost.style.height = `${rect.height}px`
-    ghost.style.lineHeight = `${rect.height}px`
-    ghost.style.font = cs.font
-    ghost.style.fontSize = cs.fontSize
-    ghost.style.fontFamily = cs.fontFamily
-    ghost.style.fontWeight = cs.fontWeight
-    ghost.style.letterSpacing = cs.letterSpacing
-  }
-  // 选中某条候选：把完整文本填入当前单元格。
-  // 关键：Univer 的单元格编辑器是 Docs 富文本结构，直接改 editor.textContent 不一定进其内部模型，
-  // 因此单纯“改文本+派发合成 Enter”经常提交不进去（表现为“点了没填上”）。
-  // 可靠做法：① 先尽量把编辑器文本改为所选值并触发 input（让编辑器内部模型同步）；
-  // ② 执行 set-cell-edit-visible 关闭编辑器（编辑器会按当前内容提交一次）；
-  // ③ 兜底：无论编辑器提交结果如何，延迟用 worksheet.setValue 强制把单元格写成所选值（权威写入）。
-  // 这样即使富文本模型同步失败，单元格最终也一定是所选值，不会“点了没反应”。
-  // item：候选（display=展示文本，raw=真实写入值；日期列 raw 为序列号，保证写回仍是真日期）。
-  const acceptAc = (item: AcItem) => {
-    const editor = acEditorRef.current
-    const st = acStateRef.current
-    const col = st.col
-    const row = st.row
-    const value = item?.display ?? ''
-    const raw = item?.raw
-    if (!value && raw == null) {
-      hideAc()
-      return
-    }
-    // 立即收起弹层与灰色续接，避免重复触发 / 编辑器关闭后再次弹出
-    hideAc()
-    const univerAPI = univerRef.current
-    if (editor) {
-      try {
-        editor.focus()
-        editor.textContent = value
-        editor.dispatchEvent(new InputEvent('input', { bubbles: true }))
-      } catch {
-        /* noop */
-      }
-    }
-    // 关闭编辑器（按当前内容提交一次）
-    try {
-      ;(univerAPI as unknown as { executeCommand: (id: string, p?: object) => unknown })
-        .executeCommand('sheet.operation.set-cell-edit-visible', { visible: false })
-    } catch {
-      /* noop */
-    }
-    // 兜底强制写入：编辑器关闭后再写一次，确保单元格一定是所选值（日期列写序列号 raw）
-    if (row > 0 && col >= 0) {
-      window.setTimeout(() => {
-        try {
-          const ws = univerRef.current?.getActiveSheet()?.worksheet
-          ws?.getRange(row, col).setValue(raw != null ? raw : value)
-        } catch {
-          /* noop */
-        }
-      }, 60)
-    }
-    // 锁定 300ms：接纳后编辑器尚在关闭过程中，轮询可能在下一帧读到刚写入的 value 而重新弹层；
-    // 锁定期内轮询直接跳过，待编辑器被 Univer 移除（轮询检测到无编辑器）后自然收起。
-    acAcceptingRef.current = true
-    window.setTimeout(() => {
-      acAcceptingRef.current = false
-    }, 300)
-    pushHistory(col, raw != null ? String(raw) : value)
+  // 选中候选后的“写入”：直接把所选值写回单元格（日期列写序列号 raw，保证仍是真日期），
+  // 并记录到该列历史。编辑器关闭由控制器统一处理，这里只负责最终落盘。
+  // 写入选中候选：实际落盘由 Univer 原生提交完成（acController 在 SetRangeValuesCommand 执行前
+  // 把提交值替换为候选，从而绕过 currentEditCell$.row 的 +1 偏移）。此处仅负责把该值记入历史，
+  // 供后续打字联想。故不再直接 setValue（直接写会用偏移后的 row，反而写错行）。
+  const commitAc = (item: AcItem, col: number) => {
+    const raw = item.raw
+    const display = item.display
+    pushHistory(col, raw != null ? String(raw) : display)
   }
 
   // 关闭文件：若有未保存修改，先自动保存（不弹确认框），保存成功后再关闭；
@@ -574,12 +412,13 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
   useEffect(() => {
     if (!containerRef.current) return
     let disposed = false
-    const { univerAPI } = createUniver({
+    const { univer, univerAPI } = createUniver({
       locale: LocaleType.ZH_CN,
       locales: { [LocaleType.ZH_CN]: UniverPresetSheetsCoreZhCN },
       presets: [UniverSheetsCorePreset({ container: containerRef.current })],
     })
     univerRef.current = univerAPI
+    univerInstRef.current = univer
 
     // 结构性变更（删/插行、列、区域移动等）不一定触发 SheetValueChanged，
     // 但会改变数据，必须标记为“有修改”并触发自动保存。
@@ -653,6 +492,18 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
         // 按加载数据初始化“自动金额行”集合（金额==数量×单价或待填 → 自动；否则手工）
         autoAmountRows.current = buildAutoAmountRows(res.rows)
         univerAPI.createWorkbook(data)
+        // 挂载单元格输入记忆（自动补全）控制器：用 Univer 官方编辑桥接服务驱动。
+        // 关键：必须在 createWorkbook 之后挂载 —— Univer 的 IEditorBridgeService（编辑器桥接服务）
+        // 要等第一个工作表真正实例化后才完成注册；在此之前 injector.get(IEditorBridgeService)
+        // 会抛「Expect 1 dependency item(s) ... but get 0」，attachAutocomplete 只能静默降级为 noop，
+        // 表现为「输入过程完全不出现提示」。故把挂载点从 effect 顶层挪到 createWorkbook 之后。
+        acRef.current = attachAutocomplete(univer, {
+          computeItems: (t, col, row) => computeSuggestions(t, col, row),
+          commit: (item, col) => commitAc(item, col),
+          render: (s) => setAcUi(s),
+          container: containerRef.current,
+          univerAPI: univerAPI as unknown as { executeCommand: (id: string, params?: object) => unknown },
+        })
         // 激活单元格落在数据末尾空行，便于继续录入 / 默认「填入」位置；
         // 并滚动到该行，同时多留末尾几行真实数据在视野内（END_VISIBLE_LEAD）
         const r = Math.max(1, Math.min(res.rows.length + 1, 100000))
@@ -684,6 +535,12 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
         /* noop */
       }
       try {
+        acRef.current?.dispose()
+      } catch {
+        /* noop */
+      }
+      acRef.current = null
+      try {
         univerAPI.dispose()
       } catch {
         /* noop */
@@ -704,6 +561,7 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
         /* noop */
       }
       univerRef.current = null
+      univerInstRef.current = null
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [file.filePath, reloadToken])
@@ -767,230 +625,6 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
     return () => window.removeEventListener('keydown', onKey)
   }, [])
 
-  // 单元格输入记忆（自动补全）：轮询式触发。
-  // 为什么用轮询而非“监听原生 input 事件”：
-  // ① Univer 的 Docs 单元格编辑器是 contentEditable，敲首字符时 input 事件虽触发，但此刻字符
-  //    尚未提交进 DOM（textContent 读到空），导致“输 9 一个提示都没有”；轮询每帧重读 textContent，
-  //    首帧可能为空、下一帧文本已落 DOM，自然补齐首字符。
-  // ② 直接 document.querySelector('[data-u-comp="editor"]') 定位编辑器，不依赖 document.activeElement
-  //    恰好是编辑器、也不依赖 input 事件能否冒泡/被捕获，规避此前多次“完全不提示”的脆弱点。
-  // ③ 仅在“文本或所在单元格变化”时才重算候选（acLastKeyRef 去重），空闲时每帧仅一次轻量 querySelector。
-  // 弹层出现后，上下键/回车/Tab/Esc 仍用捕获阶段 keydown 拦截，做到“像 Excel 一样边打边提示”。
-  useEffect(() => {
-    console.log('[AC-DEBUG] v5 mounted; AC_DEBUG=' + AC_DEBUG)
-    // 编辑器查找：依次尝试一组选择器；只要其中任何一个存在且包含/自身是 INPUT/TEXTAREA/contenteditable
-    // 都算命中。Univer 版本之间包装层有时是 [data-u-comp='editor']、有时是 slate 编辑区
-    // （带 [data-slate-editor]），多选择器兜底更稳。
-    const EDITOR_SELECTORS = [
-      "[data-u-comp='editor']",
-      "[data-u-comp='cell-editor']",
-      '.univer-cell-editor',
-      '[data-slate-editor]',
-      '[contenteditable]:not([data-u-comp])',
-    ]
-    // 从匹配到的根向下找出真正承担输入的"叶子"：INPUT/TEXTAREA/contenteditable
-    const pickInnerInput = (el: HTMLElement): { node: HTMLElement; via: string } | null => {
-      const ownTag = (el.tagName || '').toUpperCase()
-      if (ownTag === 'INPUT' || ownTag === 'TEXTAREA') return { node: el, via: 'self:' + ownTag }
-      const ceAttr = el.getAttribute('contenteditable')
-      if (ceAttr === 'true' || ceAttr === '') return { node: el, via: 'self:CE' }
-      const innerInp = el.querySelector('input, textarea') as HTMLElement | null
-      if (innerInp) return { node: innerInp, via: 'inner:' + innerInp.tagName }
-      const innerCE = el.querySelector('[contenteditable="true"], [contenteditable=""]') as HTMLElement | null
-      if (innerCE) return { node: innerCE, via: 'inner:CE' }
-      return null
-    }
-    const getCellEditor = (): { el: HTMLElement | null; sel: string; inner: { node: HTMLElement; via: string } | null } => {
-      for (const sel of EDITOR_SELECTORS) {
-        try {
-          const el = document.querySelector(sel) as HTMLElement | null
-          if (!el) continue
-          // 这个候选是不是真"在编辑"：自己或子孙能找到 INPUT/TEXTAREA/contenteditable 才算
-          const inner = pickInnerInput(el)
-          if (inner) return { el, sel, inner }
-          // 自己不是也没子节点：记录但暂时不用，继续找下一个选择器
-        } catch {
-          /* noop */
-        }
-      }
-      // 兜底：如果所有带优先选择器的都没有 inner，但首选择器命中了（说明它只是个永远存在的占位）
-      // 还是返回第一个命中节点 + sel，但 inner=null，让 HUD 把这种 case 直接暴露出来
-      for (const sel of EDITOR_SELECTORS) {
-        try {
-          const el = document.querySelector(sel) as HTMLElement | null
-          if (el) return { el, sel, inner: null }
-        } catch {
-          /* noop */
-        }
-      }
-      return { el: null, sel: '', inner: null }
-    }
-    // 读"输入区"真实文本：INPUT/TEXTAREA 读 .value；contenteditable 读 textContent
-    const readInputText = (inner: { node: HTMLElement; via: string } | null, fallback: HTMLElement | null): string => {
-      const node = inner?.node || fallback
-      if (!node) return ''
-      const tag = (node.tagName || '').toUpperCase()
-      if (tag === 'INPUT' || tag === 'TEXTAREA') {
-        return ((node as HTMLInputElement | HTMLTextAreaElement).value || '').replace(/\s+/g, ' ').trim()
-      }
-      // contenteditable：textContent
-      return ((node.textContent || '').replace(/\s+/g, ' ')).trim()
-    }
-
-    const dbg = (s: string) => {
-      if (!AC_DEBUG) return
-      const d = acDebugRef.current
-      if (d) d.textContent = s
-    }
-    const tick = () => {
-      // 自调度，保证持续轮询
-      acRafRef.current = requestAnimationFrame(tick)
-      // 接纳候选过程中（编辑器正关闭）跳过，避免读到刚写入的 value 而重新弹层
-      if (acAcceptingRef.current) {
-        dbg('[accepting 锁定中]')
-        return
-      }
-      try {
-        const univerAPI = univerRef.current
-        const { el: editor, sel, inner } = getCellEditor()
-        // 把编辑器根和 inner 的标签摘要拼出来，无论命中与否都暴露 DOM 真相
-        const tagSummary = editor
-          ? '<' + (editor.tagName || '').toLowerCase() + '>' +
-            (inner ? '/' + inner.via + ':<' + (inner.node.tagName || '').toLowerCase() + '>' :
-              (() => {
-                // 命中但没 inner：暴露外层首 160 字 innerHTML，下一轮就能直接定真选择器
-                const snippet = (editor.innerHTML || '').slice(0, 160).replace(/\s+/g, ' ').trim()
-                return '/no-inner html=' + snippet
-              })())
-          : ''
-        if (!editor) {
-          // 编辑器一个都没选中：把整页“像编辑器”的 DOM 全部探测出来，直接告诉我们真选择器。
-          acLastKeyRef.current = ''
-          if (acStateRef.current.open) hideAc()
-          const probe: string[] = []
-          const ucomps = new Set<string>()
-          document.querySelectorAll('[data-u-comp]').forEach((e) => {
-            const v = e.getAttribute('data-u-comp')
-            if (v) ucomps.add(v)
-          })
-          probe.push('ucomps=' + [...ucomps].join('|'))
-          const editableEls = Array.from(document.querySelectorAll('[contenteditable]')) as HTMLElement[]
-          probe.push('editable=' + editableEls.length)
-          editableEls.slice(0, 3).forEach((e, i) => {
-            probe.push('ce' + i + '=<' + e.tagName.toLowerCase() + (e.className ? '.' + String(e.className).split(/\s+/).slice(0, 2).join('.') : '') + '>')
-          })
-          const inputs = Array.from(document.querySelectorAll('input,textarea')) as HTMLElement[]
-          probe.push('inputs=' + inputs.length)
-          inputs.slice(0, 3).forEach((e, i) => {
-            probe.push('inp' + i + '=<' + e.tagName.toLowerCase() + (e.id ? '#' + e.id : '') + (e.className ? '.' + String(e.className).split(/\s+/).slice(0, 2).join('.') : '') + '>')
-          })
-          const containers = Array.from(document.querySelectorAll("div[id^='univer-doc-selection-container-']")) as HTMLElement[]
-          probe.push('containers=' + containers.length)
-          if (containers[0]) {
-            const c = containers[0]
-            probe.push('cont=<' + c.tagName.toLowerCase() + (c.className ? '.' + String(c.className).split(/\s+/).slice(0, 2).join('.') : '') + '> kids=' + c.children.length)
-            const k = c.children[0] as HTMLElement | undefined
-            if (k) probe.push('kid0=<' + k.tagName.toLowerCase() + (k.className ? '.' + String(k.className).split(/\s+/).slice(0, 2).join('.') : '') + '> html=' + (k.innerHTML || '').slice(0, 160))
-          }
-          dbg('ed=none | ' + probe.join(' | '))
-          return
-        }
-        const ar = univerAPI?.getActiveSheet()?.worksheet?.getActiveRange?.()
-        // 编辑时 getActiveRange() 可能返回 null（编辑器接管选区）→ 回退到最近一次激活单元格
-        let col = -1
-        let row = -1
-        let usingFallback = false
-        if (ar) {
-          col = ar.getColumn()
-          row = ar.getRow()
-          acLastCellRef.current = { col, row }
-        } else if (acLastCellRef.current) {
-          col = acLastCellRef.current.col
-          row = acLastCellRef.current.row
-          usingFallback = true
-        } else {
-          acLastKeyRef.current = ''
-          if (acStateRef.current.open) hideAc()
-          dbg('ed=' + sel + ' ' + tagSummary + ' txt=' + JSON.stringify(readInputText(inner, editor).slice(0, 24)) + ' ar=null(no-fallback)')
-          return
-        }
-        const text = readInputText(inner, editor)
-        const key = col + ':' + row + ':' + text
-        if (key === acLastKeyRef.current) return // 未变化：保持当前弹层，不重复计算
-        acLastKeyRef.current = key
-        acEditorRef.current = inner?.node || editor
-        // 列范围硬约束：只在账单表 9 列内才弹候选（先判断，避免在账外点时永远停在 txt=空 而看不到真正原因）
-        const colOut = col < 0 || col >= COL_COUNT
-        if (colOut) {
-          hideAc()
-          dbg('ed=' + sel + ' ' + tagSummary + ' ar=' + (usingFallback ? 'fb:' : '') + col + ',' + row + ' txt=' + JSON.stringify(text) + ' SKIP:col-out[0..' + (COL_COUNT - 1) + ']')
-          return
-        }
-        if (!text) {
-          hideAc()
-          dbg('ed=' + sel + ' ' + tagSummary + ' ar=' + (usingFallback ? 'fb:' : '') + col + ',' + row + ' txt=空 (col ok)')
-          return
-        }
-        const colVals = getColumnValuesWithRows(col)
-        const items = computeSuggestions(text, col, row)
-        if (!items.length) {
-          hideAc()
-          dbg('ed=' + sel + ' ' + tagSummary + ' ar=' + (usingFallback ? 'fb:' : '') + col + ',' + row + ' txt=' + JSON.stringify(text) + ' colVals=' + colVals.length + ' sample=' + JSON.stringify(colVals.slice(0, 3).map((v) => v.value)) + ' sug=0')
-          return
-        }
-        acStateRef.current = { ...acStateRef.current, open: true, items, index: 0, col, row, partial: text }
-        showAc(items, editor.getBoundingClientRect())
-        // Excel 式“框内灰色续接”提示
-        updateGhost(text, items, acEditorRef.current)
-        dbg('ed=' + sel + ' ' + tagSummary + ' ar=' + (usingFallback ? 'fb:' : '') + col + ',' + row + ' txt=' + JSON.stringify(text) + ' colVals=' + colVals.length + ' sample=' + JSON.stringify(colVals.slice(0, 3).map((v) => v.value)) + ' sug=' + items.length + ' OPEN')
-      } catch (err) {
-        dbg('ERR ' + (err instanceof Error ? err.message : String(err)))
-      }
-    }
-
-    const onEditorKeydown = (e: KeyboardEvent) => {
-      if (!acStateRef.current.open) return
-      const st = acStateRef.current
-      const items = st.items
-      if (e.key === 'ArrowDown') {
-        e.preventDefault()
-        e.stopPropagation()
-        const idx = (st.index + 1) % items.length
-        acStateRef.current = { ...st, index: idx }
-        setAcUi((u) => ({ ...u, index: idx }))
-      } else if (e.key === 'ArrowUp') {
-        e.preventDefault()
-        e.stopPropagation()
-        const idx = (st.index - 1 + items.length) % items.length
-        acStateRef.current = { ...st, index: idx }
-        setAcUi((u) => ({ ...u, index: idx }))
-      } else if (e.key === 'Enter' || e.key === 'Tab') {
-        if (items.length) {
-          e.preventDefault()
-          e.stopPropagation()
-          acceptAc(items[st.index])
-        }
-      } else if (e.key === 'Escape') {
-        e.preventDefault()
-        e.stopPropagation()
-        hideAc()
-      }
-    }
-
-    acRafRef.current = requestAnimationFrame(tick)
-    document.addEventListener('keydown', onEditorKeydown, true)
-    return () => {
-      if (acRafRef.current != null) cancelAnimationFrame(acRafRef.current)
-      document.removeEventListener('keydown', onEditorKeydown, true)
-      if (acMeasureRef.current && acMeasureRef.current.parentElement) {
-        acMeasureRef.current.parentElement.removeChild(acMeasureRef.current)
-        acMeasureRef.current = null
-      }
-    }
-    // 这些回调只依赖 refs / 稳定 setter，故仅挂载一次
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
-
   return (
     <div className="univer-sheet">
       <div className="memo-header">
@@ -999,9 +633,6 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
           {dirty && <span className="dirty-dot" title="有未保存修改">●</span>}
         </div>
         <div className="memo-header-actions">
-          <button className="btn btn-primary" disabled={saving} onClick={() => void handleSave()}>
-            {saving ? '保存中…' : '保存 Ctrl+S'}
-          </button>
           <button className="btn btn-outline" onClick={() => api.openFile(file.filePath)} title="用 Excel 程序打开">
             Excel 打开
           </button>
@@ -1014,22 +645,34 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
         </div>
       </div>
       <div ref={containerRef} className="univer-container" />
-      {/* Excel 式“框内灰色续接”：绝对定位叠加在编辑器已输入文本之后，仅展示，不拦截事件 */}
-      <div className="ac-ghost" ref={acGhostRef} />
-      {AC_DEBUG && <div className="ac-debug" ref={acDebugRef} />}
       {acUi.open && acUi.pos && (
-        <div className="ac-popup" style={{ left: acUi.pos.left, top: acUi.pos.top }}>
+        <div
+          className="ac-popup"
+          style={{ left: acUi.pos.left, top: acUi.pos.top, minWidth: acUi.pos.width }}
+          // 关键：mousedown/click 都拦截，绝不漏到 Univer 画布。
+          // 候选项的 accept 放在 onClick 触发（而非 mousedown）：
+          // 若 mousedown 上就 accept+关弹层，弹层会在「mousedown→mouseup」整段手势中途被移除，
+          // 随后的 mouseup/click 落到下方画布，被 Univer 解读为“点到了某格 → 重新进入该格编辑”，
+          // 于是 currentEditCell$ 再次触发、弹层重新弹出（表现为“点第一次能带入但弹层不消失，再点一次才消失”）。
+          // 改为 onClick 触发后，弹层在整个手势期间一直存在，click 始终落在弹层内部、被 stopPropagation 吞掉，
+          // 画布收不到任何事件，从根本上杜绝重开。
+          onMouseDown={(e) => e.stopPropagation()}
+          onClick={(e) => e.stopPropagation()}
+        >
           {acUi.items.map((it, i) => (
             <div
               key={i}
               className={'ac-item' + (i === acUi.index ? ' ac-active' : '')}
-              onMouseEnter={() => {
-                acStateRef.current = { ...acStateRef.current, index: i }
-                setAcUi((u) => ({ ...u, index: i }))
-              }}
+              onMouseEnter={() => acRef.current?.setIndex(i)}
+              // mousedown 只 preventDefault：保住编辑器焦点、不丢已输文本，但【先不】accept/关弹层；
+              // 真正的 accept 放在 onClick（见下），让弹层陪完整个手势，避免事件漏到画布重开。
               onMouseDown={(e) => {
                 e.preventDefault()
-                acceptAc(it)
+              }}
+              onClick={(e) => {
+                e.preventDefault()
+                e.stopPropagation()
+                acRef.current?.accept(it)
               }}
             >
               {it.display}

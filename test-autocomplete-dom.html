@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"">
+<title>自动补全 DOM 自测</title>
+<style>
+  body { font-family: -apple-system, sans-serif; margin: 20px; }
+  table { border-collapse: collapse; margin: 12px 0; }
+  td { border: 1px solid #999; padding: 4px 8px; min-width: 100px; height: 28px; }
+  td[contenteditable="true"] { cursor: text; background: #fff; }
+  td[contenteditable="true"]:focus { background: #fffacd; outline: 2px solid #6bf; }
+  .ac-popup {
+    position: fixed; z-index: 9999; background: #fff; border: 1px solid #888;
+    box-shadow: 2px 2px 6px rgba(0,0,0,0.2); min-width: 140px; max-height: 220px; overflow: auto;
+  }
+  .ac-item { padding: 4px 10px; cursor: pointer; }
+  .ac-item.ac-active { background: #6bf; color: #fff; }
+  .ac-debug {
+    position: fixed; left: 8px; bottom: 8px; z-index: 10000; max-width: 90vw;
+    background: rgba(0,0,0,0.78); color: #6f6; font: 11px monospace;
+    padding: 6px 10px; border-radius: 4px; white-space: pre-wrap; pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<h2>自动补全 DOM 自测</h2>
+<p>双击单元格进入编辑状态。试试在货品名称列输入"苹"。</p>
+<table id="grid">
+  <tr><th>序号</th><th>日期</th><th>货品名称</th><th>单位</th><th>数量</th><th>单价</th><th>金额</th><th>调货人</th><th>备注</th></tr>
+</table>
+<button id="fillData">载入示例数据</button>
+<div class="ac-debug" id="dbg">(idle)</div>
+<div class="ac-popup" id="popup" style="display:none"></div>
+
+<script type="module">
+  import { computeSuggestions, extractColumnValues } from '/dist-autocomplete/autocomplete.mjs'
+
+  // 填初始数据（demo 用）
+  const COLS = 9
+  const SAMPLE = [
+    [1, '2026-08-01', '苹果',          '斤', 2, 5, 10, '老张', ''],
+    [2, '2026-08-01', '香蕉',          '斤', 3, 4, 12, '老张', ''],
+    [3, '2026-08-02', '山楂',          '斤', 1, 8, 8,  '老张', ''],
+    [4, '2026-08-02', '苹果梨',        '斤', 2, 7, 14, '老张', ''],
+    [5, '2026-08-03', '苹果',          '斤', 1, 5, 5,  '老张', ''],
+    [6, '2026-08-03', '苹果干',        '斤', 1, 18,18, '老张', ''],
+    [7, '2026-08-04', '橘子',          '斤', 4, 3, 12, '老张', ''],
+  ]
+  function renderGrid(rows) {
+    const t = document.getElementById('grid')
+    while (t.rows.length > 1) t.deleteRow(1)
+    rows.forEach((r, i) => {
+      const tr = t.insertRow()
+      tr.dataset.row = i
+      r.forEach((v, c) => {
+        const td = tr.insertCell()
+        td.dataset.col = c
+        if (c === 1) td.dataset.dateSerial = ''
+        td.textContent = v
+        td.contentEditable = 'true'
+        td.spellcheck = false
+      })
+    })
+  }
+  document.getElementById('fillData').onclick = () => renderGrid(SAMPLE)
+  // 默认空表
+  for (let i = 0; i < 3; i++) {
+    const tr = document.getElementById('grid').insertRow()
+    for (let c = 0; c < COLS; c++) {
+      const td = tr.insertCell()
+      td.dataset.col = c
+      td.contentEditable = 'true'
+      td.spellcheck = false
+    }
+  }
+
+  // 模拟滑窗 workbook（供 extractColumnValues 用）
+  function collectWb() {
+    const cellData = {}
+    document.querySelectorAll('#grid tr').forEach((tr, ri) => {
+      const r = ri - 1 // 跳过表头
+      if (r < 0) return
+      cellData[r] = cellData[r] || {}
+      tr.querySelectorAll('td').forEach((td, c) => {
+        if (td.textContent.trim()) cellData[r][c] = { v: td.textContent }
+      })
+    })
+    return { sheets: { bill: { cellData } } }
+  }
+
+  // ─── 自动补全核心 ───
+  const popup = document.getElementById('popup')
+  const dbg = document.getElementById('dbg')
+  let acState = { open: false, items: [], index: 0, editor: null, col: -1, row: -1, partial: '' }
+  let acLastKey = ''
+  let acAccepting = false
+
+  function getCellEditor() {
+    const a = document.activeElement
+    if (a && a.tagName === 'TD' && a.isContentEditable) return a
+    return null
+  }
+  function readText(td) {
+    // 取一个 "行"：td 里直接的文本节点（子 <br/> 或 <div> 不算）— 简化：用 textContent 第一行
+    const t = td.textContent || ''
+    // Slate/Excel 是单行，textContent 直接是输入文本
+    return t.replace(/\s+/g, ' ').trim()
+  }
+  function showAc(items, rect) {
+    popup.innerHTML = items.map((it, i) =>
+      `<div class="ac-item${i === 0 ? ' ac-active' : ''}" data-i="${i}">${it.display}</div>`
+    ).join('')
+    popup.style.display = 'block'
+    popup.style.left = rect.left + 'px'
+    popup.style.top = (rect.bottom + 2) + 'px'
+    acState = { open: true, items, index: 0, editor: null, col: -1, row: -1, partial: '' }
+  }
+  function hideAc() {
+    popup.style.display = 'none'
+    acState.open = false
+  }
+  function acceptAc(item) {
+    if (!acState.editor) return
+    acAccepting = true
+    acState.editor.textContent = item.display
+    acState.editor.blur()
+    // 模拟"按 Enter 提交"：让 td 失焦即可（contenteditable 在 blur 后默认会保存）
+    setTimeout(() => { acAccepting = false }, 200)
+    hideAc()
+  }
+
+  function tick() {
+    requestAnimationFrame(tick)
+    if (acAccepting) { dbg.textContent = '[accepting 锁定]' ; return }
+    const ed = getCellEditor()
+    if (!ed) {
+      acLastKey = ''
+      hideAc()
+      dbg.textContent = '[idle] activeElement=' + (document.activeElement && document.activeElement.tagName)
+      return
+    }
+    const col = Number(ed.dataset.col)
+    const row = Number(ed.parentElement.dataset.row)
+    const text = readText(ed)
+    const key = col + ':' + row + ':' + text
+    if (key === acLastKey) return
+    acLastKey = key
+    if (!text) { hideAc(); dbg.textContent = '[ed c='+col+' r='+row+'] text=空'; return }
+    const wb = collectWb()
+    const colVals = extractColumnValues(wb, col)
+    const items = computeSuggestions(text, col, row + 1, colVals, []) // currentRow 用 row+1 与 Univer 一致
+    if (!items.length) { hideAc(); dbg.textContent = `[ed c=${col} r=${row}] text=${JSON.stringify(text)} colVals=${colVals.length} sug=0`; return }
+    // 把 editor ref 保存
+    acState.editor = ed
+    acState.col = col
+    acState.row = row
+    acState.partial = text
+    showAc(items, ed.getBoundingClientRect())
+    dbg.textContent = `[ed c=${col} r=${row}] text=${JSON.stringify(text)} colVals=${colVals.length} sample=${JSON.stringify(colVals.slice(0,3).map(v=>v.value))} sug=${items.length}\nitems=${JSON.stringify(items.map(i=>i.display))}`
+  }
+  requestAnimationFrame(tick)
+
+  // 键盘处理：在 capture 阶段
+  document.addEventListener('keydown', (e) => {
+    if (!acState.open) return
+    if (e.key === 'ArrowDown') { e.preventDefault(); /* ... */ }
+    if (e.key === 'ArrowUp')   { e.preventDefault(); /* ... */ }
+    if (e.key === 'Enter' || e.key === 'Tab') {
+      e.preventDefault()
+      const it = popup.querySelector('.ac-active')
+      if (it) acceptAc({ display: it.textContent })
+    }
+    if (e.key === 'Escape') { e.preventDefault(); hideAc() }
+  }, true)
+
+  // 鼠标点击候选：mousedown（早于 blur）
+  popup.addEventListener('mousedown', (e) => {
+    const div = e.target.closest('.ac-item')
+    if (!div) return
+    e.preventDefault()
+    acceptAc({ display: div.textContent })
+  })
+
+  // report 入口
+  window.__test_report = () => {
+    return new Promise((resolve) => {
+      // 自动化测试钩子：用 dispatchEvent 模拟选中 + 输入
+      const td = document.querySelector('td[data-col="2"]') // 货品名称
+      td.focus()
+      td.textContent = ''
+      // 触发 React-like 序列: input
+      const ev = new InputEvent('input', { bubbles: true })
+      td.dispatchEvent(ev)
+      setTimeout(() => {
+        td.textContent = '苹'
+        td.dispatchEvent(new InputEvent('input', { bubbles: true }))
+        setTimeout(() => {
+          const popupVisible = popup.style.display === 'block'
+          const items = [...popup.querySelectorAll('.ac-item')].map(i => i.textContent)
+          resolve({ popupVisible, items, dbg: dbg.textContent })
+        }, 100)
+      }, 50)
+    })
+  }
+</script>
+</body>
+</html>

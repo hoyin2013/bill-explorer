@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <title>自动补全 · Bug 复现（日期/关闭）</title>
+  <style>
+    html, body { margin: 0; padding: 0; font-family: -apple-system, "PingFang SC", sans-serif; }
+    #univer-container { position: relative; width: 100vw; height: 72vh; }
+    #status {
+      position: fixed; top: 8px; right: 8px; z-index: 10000;
+      background: rgba(0,0,0,.82); color: #4f8; padding: 6px 10px;
+      font: 12px/1.4 monospace; white-space: pre; border-radius: 6px; max-width: 46vw;
+    }
+    #ac-popup {
+      position: absolute; z-index: 9999; display: none;
+      background: #fff; border: 1px solid #d0d7de; border-radius: 6px;
+      box-shadow: 0 6px 18px rgba(0,0,0,.18); font-size: 13px; overflow: hidden;
+    }
+    .ac-item { padding: 5px 12px; cursor: pointer; white-space: nowrap; }
+    .ac-item.ac-active, .ac-item:hover { background: #e8f0fe; }
+  </style>
+</head>
+<body>
+  <div id="status">init…</div>
+  <div id="univer-container"></div>
+  <div id="ac-popup"></div>
+
+  <script type="module">
+    import { createUniver, LocaleType } from '@univerjs/presets'
+    import { UniverSheetsCorePreset } from '@univerjs/preset-sheets-core'
+    import UniverPresetSheetsCoreZhCN from '@univerjs/preset-sheets-core/locales/zh-CN'
+    import '@univerjs/preset-sheets-core/lib/index.css'
+    import { attachAutocomplete } from '/src/renderer/lib/acController.ts'
+    import { computeSuggestions, extractColumnValues } from '/src/renderer/lib/autocomplete.ts'
+    import { rowsToWorkbookData } from '/src/renderer/univerAdapter.ts'
+
+    const statusEl = document.getElementById('status')
+    const log = []
+    const setStatus = () => { statusEl.textContent = log.join('\n') }
+    const logline = (s) => { log.push(s); setStatus() }
+
+    const HEADER = ['序号', '日期', '货品名称', '单位', '数量', '单价', '金额', '调货人', '备注']
+    const COL_COUNT = HEADER.length
+    const DATE_COL = 1
+    const GOODS_COL = 2
+
+    // 日期列里故意放一个“2024-03-11”，既验证“选候选后是否变成序列号”，也验证列样式是否生效。
+    const buildDataRows = () => {
+      const goods = ['苹果', '苹果汁', '苹果梨', '香蕉', '橙子', '西瓜', '葡萄', '苹果干', '芒果', '火龙果']
+      const rows = []
+      for (let i = 0; i < goods.length; i++) {
+        const date = i === 0 ? '2024-03-11' : `2026-08-${String(i + 1).padStart(2, '0')}`
+        rows.push([String(i + 1), date, goods[i], '斤', String((i + 1) * 2), '3', '', '张三', '备注' + i])
+      }
+      return rows
+    }
+
+    let apiRef = null
+    const computeItems = (partial, col, currentRow) => {
+      const wb = apiRef && apiRef.getActiveWorkbook() ? apiRef.getActiveWorkbook().getSnapshot() : null
+      const colVals = extractColumnValues(wb, col)
+      return computeSuggestions(partial, col, currentRow, colVals, [])
+    }
+
+    const container = document.getElementById('univer-container')
+    const popup = document.getElementById('ac-popup')
+    let controller = null
+
+    const render = (s) => {
+      window.__ac = s
+      if (s.open && s.pos && s.items.length) {
+        popup.style.display = 'block'
+        popup.style.left = s.pos.left + 'px'  // 占位，下面用真实坐标覆盖
+        popup.style.top = s.pos.top + 'px'
+        popup.style.minWidth = (s.pos.width || 120) + 'px'
+        popup.innerHTML = s.items.map((it, i) =>
+          `<div class="ac-item${i === s.index ? ' ac-active' : ''}" data-index="${i}">${it.display}</div>`).join('')
+        popup.querySelectorAll('.ac-item').forEach((el) => {
+          el.addEventListener('mousedown', (e) => {
+            e.preventDefault()
+            const idx = Number(el.dataset.index)
+            controller && controller.accept(s.items[idx])
+          })
+        })
+      } else {
+        popup.style.display = 'none'
+        popup.innerHTML = ''
+      }
+    }
+
+    ;(async () => {
+      try {
+        const { univer, univerAPI } = createUniver({
+          locale: LocaleType.ZH_CN,
+          locales: { [LocaleType.ZH_CN]: UniverPresetSheetsCoreZhCN },
+          presets: [UniverSheetsCorePreset({ container })],
+        })
+        apiRef = univerAPI
+        window.__univer = univer
+        window.__univerAPI = univerAPI
+
+        const rows = buildDataRows()
+        const data = rowsToWorkbookData(rows)
+        univerAPI.createWorkbook(data)
+
+        const host = {
+          computeItems: (t, col, row) => computeItems(t, col, row),
+          commit: (item, col) => {},
+          render,
+          container,
+          univerAPI,
+        }
+        controller = attachAutocomplete(univer, host)
+        window.__controller = controller
+
+        window.__cellScreenPos = (row, col) => {
+          const fws = univerAPI.getActiveSheet().worksheet
+          const range = fws.getRange(row, col)
+          const rect = range.getCellRect()
+          const canvases = [...container.querySelectorAll('canvas')]
+          let canvas = canvases[0], area = -1
+          for (const c of canvases) { const r = c.getBoundingClientRect(); const a = r.width * r.height; if (a > area) { area = a; canvas = c } }
+          const cr = canvas.getBoundingClientRect()
+          return { x: cr.left + rect.left + rect.width / 2, y: cr.top + rect.top + rect.height / 2 }
+        }
+        // 读取单元格原始值 + 解析后的“有效样式”（合并 单元格.s > 列.s > 行.s）
+        window.__cellInfo = (row, col) => {
+          const wb = univerAPI.getActiveWorkbook().getSnapshot()
+          const sheet = wb.sheets.bill || Object.values(wb.sheets)[0]
+          const cell = (sheet.cellData[row] && sheet.cellData[row][col]) || null
+          const colStyle = sheet.columnData ? sheet.columnData[col] : null
+          const styles = wb.styles || {}
+          const resolve = (id) => (id ? styles[id] : null)
+          const cellStyle = cell && cell.s ? resolve(cell.s) : null
+          const colS = colStyle && colStyle.s ? resolve(colStyle.s) : null
+          const merged = Object.assign({}, colS || {}, cellStyle || {})
+          return {
+            rawValue: cell ? cell.v : undefined,
+            t: cell ? cell.t : undefined,
+            cellStyleId: cell ? cell.s : undefined,
+            colStyleId: colStyle ? colStyle.s : undefined,
+            cellStyle, colStyleRef: colS,
+            mergedHasNumFmt: !!(merged && merged.n),
+            mergedNumFmt: merged && merged.n ? merged.n.pattern : null,
+          }
+        }
+        window.__popupVisible = () => popup.style.display !== 'none'
+        window.__ready = true
+        logline('ready; dataRows=' + rows.length)
+      } catch (e) {
+        logline('FATAL ' + (e && e.message ? e.message : e))
+      }
+    })()
+  </script>
+</body>
+</html>
