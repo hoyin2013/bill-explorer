@@ -25,7 +25,8 @@ import { IEditorBridgeService, SetCellEditVisibleOperation } from '@univerjs/she
 import { IEditorService } from '@univerjs/docs-ui'
 import { ICommandService, CellValueType } from '@univerjs/core'
 import { SetRangeValuesCommand } from '@univerjs/sheets'
-import { COL_COUNT, type AcItem } from './autocomplete'
+import { COL_COUNT, DATE_COL_INDEX, type AcItem } from './autocomplete'
+import { DATE_STYLE } from '../univerAdapter'
 
 export interface AcViewState {
   open: boolean
@@ -101,6 +102,11 @@ export function attachAutocomplete(univerInst: any, host: AcHost): AcController 
   // 是否正处于“接受候选、交还 Univer 原生提交”的过程中。
   // 置位期间忽略编辑器 input$ 回调，避免任何文本变化又把弹层重新打开。
   let accepting = false
+  // 是否「真正键入过内容」：仅当 input$ 实际打字时才置位；进入编辑时的初始文本
+  // 不算输入。用于对齐 WPS/Excel——单击/选中单元格、或刚进编辑没敲字都不弹提示，只有输入才弹。
+  let hasInput = false
+  // 进入编辑时的初始文本（readInitialText），用于区分「初始内容」与「用户键入」。
+  let initialText = ''
   // 待注入的候选：accept（鼠标）或在 onKey 里命中候选（键盘）时设置。
   // 而后由 beforeCommandExecuted 拦截 Univer 的“单元格提交命令”，在它读取编辑器快照之前
   // 把提交值替换为该候选——落盘由 Univer 用 editCellState 的正确 row 完成。
@@ -146,12 +152,25 @@ export function attachAutocomplete(univerInst: any, host: AcHost): AcController 
     return { left: r?.left ?? 0, top: r?.top ?? 0 }
   }
 
-  // 用官方 position 反查真正“单元格编辑器”的屏幕矩形（排除公式栏/隐藏占位壳）：
-  // 只取视口内、有尺寸的 [data-u-comp='editor']；若仅一个直接用；多个则取离单元格坐标最近的。
+  // 定位自动补全下拉框——目标与 WPS/Excel 一致：紧贴「当前正在编辑的输入框」正下方，
+  // 左缘对齐输入框左缘、宽度对齐输入框宽度。
+  // 首选：直接用 editEditorId 拿当前编辑器的精确屏幕矩形（IEditor.getBoundingClientRect），
+  // 不受公式栏编辑器 / 隐藏占位壳的 [data-u-comp='editor'] 干扰；失败再回退到扫描真实编辑器 DOM。
   const findEditorRect = (): { left: number; top: number; width: number } | null => {
+    try {
+      const editor = editorService.getEditor(editEditorId)
+      const r = editor && typeof editor.getBoundingClientRect === 'function' ? editor.getBoundingClientRect() : null
+      if (r && r.width > 1 && r.height > 1 &&
+          r.left > -50 && r.top > -50 &&
+          r.left < window.innerWidth + 50 && r.top < window.innerHeight + 50) {
+        return { left: r.left, top: r.top + r.height + 2, width: r.width }
+      }
+    } catch {
+      /* 回退到下方 DOM 扫描 */
+    }
+    // 回退：扫描视口内、有尺寸的 [data-u-comp='editor']；多个时排除顶部公式栏、取纵向最贴近单元格的。
     if (!posRef) return null
     const { left: bl, top: bt } = containerRect()
-    const ax = bl + posRef.startX
     const ay = bt + posRef.endY
     const cands: DOMRect[] = []
     document.querySelectorAll("[data-u-comp='editor']").forEach((el) => {
@@ -167,12 +186,14 @@ export function attachAutocomplete(univerInst: any, host: AcHost): AcController 
       let best = cands[0]
       let bestD = Infinity
       for (const r of cands) {
-        const d = Math.hypot(r.left - ax, r.top - ay)
+        const dVertical = Math.abs(r.top + r.height / 2 - ay)
+        const inFormulaBar = r.top < bt + 40
+        const d = dVertical + (inFormulaBar ? 1e6 : 0)
         if (d < bestD) { bestD = d; best = r }
       }
       return { left: best.left, top: best.top + best.height + 2, width: best.width }
     }
-    return { left: ax, top: ay + 2, width: Math.max(60, posRef.endX - posRef.startX) }
+    return { left: bl + posRef.startX, top: ay + 2, width: Math.max(60, posRef.endX - posRef.startX) }
   }
 
   const closePopup = () => {
@@ -195,6 +216,13 @@ export function attachAutocomplete(univerInst: any, host: AcHost): AcController 
       closePopup()
       return
     }
+    // 与 WPS/Excel 对齐：仅在「真正输入了内容」时才出提示。单击/选中单元格、或刚进入编辑
+    // 但还没敲字（即使是填充了内容的单元格）都不弹。hasInput 由 input$ 打字置位，
+    // 进入编辑时的初始文本（readInitialText）不算输入，避免「双击/进入编辑即弹」。
+    if (!hasInput) {
+      closePopup()
+      return
+    }
     const t = (text || '').replace(/\s+/g, ' ').trim()
     if (!t) {
       closePopup()
@@ -211,8 +239,13 @@ export function attachAutocomplete(univerInst: any, host: AcHost): AcController 
     host.render({ open: true, items, index, pos })
   }
 
-  const handleText = (text: string) => {
+  const handleText = (text: string, isTyping: boolean) => {
     if (accepting) return
+    if (isTyping) {
+      // 进入编辑时的初始文本（readInitialText）若原样出现，不算「输入」，避免双击填充单元格即弹。
+      if (!hasInput && text === initialText) return
+      hasInput = true
+    }
     const key = editCol + ':' + editRow + ':' + text
     if (key === lastKey) return
     lastKey = key
@@ -237,10 +270,14 @@ export function attachAutocomplete(univerInst: any, host: AcHost): AcController 
       window.setTimeout(() => { if (editEditorId && editRow >= 0) attachEditor() }, 30)
       return
     }
+    // 记录进入编辑时的初始文本；它属于「未输入」，不触发提示（只有真正打字才弹）。
+    initialText = readInitialText()
+    hasInput = false
     if (typeof editor.input$?.subscribe === 'function') {
-      editorSub = editor.input$.subscribe((ev: { content?: string }) => handleText(ev?.content ?? ''))
+      editorSub = editor.input$.subscribe((ev: { content?: string }) => handleText(ev?.content ?? '', true))
     }
-    handleText(readInitialText())
+    // 进入编辑的初始文本不作为「输入」，不弹提示
+    handleText(initialText, false)
   }
 
   const endEdit = () => {
@@ -256,10 +293,14 @@ export function attachAutocomplete(univerInst: any, host: AcHost): AcController 
     posRef = null
     lastKey = ''
     accepting = false
+    hasInput = false
+    initialText = ''
     closePopup()
   }
 
   const accept = (item: AcItem | null) => {
+    hasInput = false
+    initialText = ''
     if (!item) {
       pendingAccept = null
       clearPendingTimer()
@@ -330,10 +371,15 @@ export function attachAutocomplete(univerInst: any, host: AcHost): AcController 
     const isNum = typeof raw === 'number'
     // 保留原有 value 的其它字段（如样式 s），仅覆盖 v / t。
     const prev = typeof cmd.params.value === 'object' && cmd.params.value ? cmd.params.value : {}
+    // 日期列：写回真日期的同时，强制套用列日期样式（DATE_STYLE = yyyy-mm-dd）。
+    // 否则该单元格只有列级 numFmt（本版本不生效），会退化成裸序列号（如 45874），
+    // 表现正是「提示显示正常（2026-08-16），填入却变数字」。套上单元格级样式后按日期显示。
+    const isDateCell = acceptCol === DATE_COL_INDEX && isNum
     cmd.params.value = {
       ...prev,
       v: raw,
       t: isNum ? CellValueType.NUMBER : CellValueType.STRING,
+      ...(isDateCell ? { s: DATE_STYLE } : {}),
     }
     // 记录历史，让自动补全后续能建议该值（acceptCol 而非 editCol：endEdit 可能已清零 editCol）。
     try { host.commit(item, acceptCol) } catch { /* noop */ }
@@ -362,6 +408,8 @@ export function attachAutocomplete(univerInst: any, host: AcHost): AcController 
     accepting = false
     pendingAccept = null
     clearPendingTimer()
+    hasInput = false
+    initialText = ''
     // 仅在编辑器切换 / 尚未订阅时才重新挂载 input 订阅（避免每次输入都重挂）
     if (changed || !editorSub) {
       lastKey = '' // 强制重新计算（同一格重新进入也可能内容不同）

@@ -3,6 +3,8 @@ import { createUniver, LocaleType } from '@univerjs/presets'
 import { UniverSheetsCorePreset } from '@univerjs/preset-sheets-core'
 import UniverPresetSheetsCoreZhCN from '@univerjs/preset-sheets-core/locales/zh-CN'
 import '@univerjs/preset-sheets-core/lib/index.css'
+import { ICommandService, CommandType, IConfigService } from '@univerjs/core'
+import { KeyCode, IShortcutService } from '@univerjs/ui'
 import type { ElectronAPI, FileEntry, AIRecognizedRow } from '../types'
 import {
   rowsToWorkbookData,
@@ -308,7 +310,6 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
   // 日期列（DATE_COL_INDEX）：把序列号格式化为 yyyy-mm-dd 展示，raw 仍为序列号（写回即真日期）。
   const computeSuggestions = (partial: string, col: number, currentRow: number): AcItem[] => {
     const p = partial.trim().toLowerCase()
-    if (!p) return []
     const isDate = col === DATE_COL_INDEX
     // 把原始值转成候选：display=展示文本，raw=真实写入值。
     // 日期列（DATE_COL_INDEX）：无论来源是序列号（载入/手敲后 Univer 自动转的）还是文本
@@ -331,8 +332,9 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
       }
       return { display: String(raw), raw: raw }
     }
-    // 本列“上方”已有值（row < 当前行，与 Excel 自动完成范围一致）
-    const colVals = getColumnValuesWithRows(col).filter((x) => x.row < currentRow)
+    // 本列“上方”已有值（row < 当前行，与 Excel 自动完成范围一致）。
+    // 排除表头行（row 0）：表头是列名（如「货品名称」「日期」），不是数据值，不应作为候选。
+    const colVals = getColumnValuesWithRows(col).filter((x) => x.row >= 1 && x.row < currentRow)
     const hist = loadHistory(historyKeyOf(col))
     const cands = new Map<string, AcItem & { freq: number; row: number }>()
     for (const c of colVals) {
@@ -353,8 +355,10 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
       else cands.set(it.display, { ...it, freq: 2, row: -1 })
     }
     const all = [...cands.values()]
-    let matched = all.filter((x) => x.display.toLowerCase().startsWith(p))
-    if (!matched.length) matched = all.filter((x) => x.display.toLowerCase().includes(p))
+    // partial 非空时优先「以已输入内容开头」匹配，无开头匹配时退化为「包含匹配」。
+    // （注：当前仅在用户真正键入（hasInput）时才调用，partial 必非空；空分支为防御性保留。）
+    let matched = p ? all.filter((x) => x.display.toLowerCase().startsWith(p)) : all
+    if (p && !matched.length) matched = all.filter((x) => x.display.toLowerCase().includes(p))
     matched.sort((a, b) => {
       const ra = a.row < 0 ? -Infinity : a.row
       const rb = b.row < 0 ? -Infinity : b.row
@@ -412,11 +416,18 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
   useEffect(() => {
     if (!containerRef.current) return
     let disposed = false
+    // 整行删除：自定义命令 + 高优先级快捷键的注册句柄（createWorkbook 之后注册，卸载时释放）
+    const rowDeleteDisposables: { dispose(): void }[] = []
     const { univer, univerAPI } = createUniver({
       locale: LocaleType.ZH_CN,
       locales: { [LocaleType.ZH_CN]: UniverPresetSheetsCoreZhCN },
       presets: [UniverSheetsCorePreset({ container: containerRef.current })],
     })
+    // 关闭 Univer「数字以文本形式存储」单元格悬停告警：该告警的 i18n 键
+    // (sheets-ui.info.error / forceStringInfo) 在本版语言包中未定义，会渲染成裸键名；
+    // 账单录入器无此提示需求，且货品名/备注常含数字文本，留着反而误报。
+    univer.__getInjector().get(IConfigService)
+         .setConfig('sheets-ui.config', { disableForceStringAlert: true })
     univerRef.current = univerAPI
     univerInstRef.current = univer
 
@@ -504,6 +515,94 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
           container: containerRef.current,
           univerAPI: univerAPI as unknown as { executeCommand: (id: string, params?: object) => unknown },
         })
+        // 选中整行后按 Delete/Backspace：删除整行（移除该行、下方整体上移），而非仅清空内容。
+        // 做法：注册一个自定义命令 + 高优先级快捷键（DELETE / BACKSPACE 双绑），仅在「整行选中」时
+        // 由本快捷键接管；Univer 原生的「清除选区内容」快捷键（优先级更低）对同一按键不再触发，
+        // 故干净地只删行、不残留清空。这避开了此前 window keydown 监听抢不过 Univer 原生处理
+        // （其快捷键挂在 window 捕获阶段且注册更早）的问题。
+        // 判定：非编辑态 + 起始列 0 且覆盖到工作表最右列（点行号选整行即此形态，也兼容拖选 A~I 整行）
+        // + 非表头行（row 0）。单格/区域删除内容、编辑态删字符均保持原生行为。
+        const injector = (univer as unknown as { __getInjector?: () => { get: (t: unknown) => unknown } }).__getInjector?.()
+        const deleteCmdSvc = injector?.get(ICommandService) as
+          | { registerCommand: (c: unknown) => { dispose(): void } }
+          | undefined
+        const shortcutSvc = injector?.get(IShortcutService) as
+          | { registerShortcut: (s: unknown) => { dispose(): void } }
+          | undefined
+        const DeleteSelectedRowsCommand = {
+          id: 'bill-explorer.command.delete-selected-rows',
+          type: CommandType.COMMAND,
+          handler: () => {
+            const ws = univerRef.current?.getActiveWorkbook()?.getActiveSheet()
+            if (!ws) return false
+            const ar = ws.getActiveRange()
+            if (!ar) return false
+            const startRow = ar.getRow()
+            const endRow = ar.getLastRow()
+            const startCol = ar.getColumn()
+            const endCol = ar.getLastColumn()
+            if (startRow < 1) return false // 不删表头行
+            if (startCol !== 0 || endCol < COL_COUNT - 1) return false // 仅整行选中才删整行
+            const delCount = endRow - startRow + 1
+            // 按删除范围调整自动金额行集合（删除区间丢弃、下方整体上移），避免行号错位算错金额
+            const newSet = new Set<number>()
+            for (const r of autoAmountRows.current) {
+              if (r < startRow) newSet.add(r)
+              else if (r > endRow) newSet.add(r - delCount)
+              // r 落在删除区间 → 丢弃
+            }
+            autoAmountRows.current = newSet
+            // 直接转发到 Univer 内置「删除选中行」命令（与右键菜单完全相同的命令路径），
+            // 而不是自己调 FWorksheet.deleteRows，确保选区处理 / 合并单元格 / 撤销栈与右键一致。
+            try {
+              if (!injector) return false
+              const cmdSvc = injector.get(ICommandService) as {
+                executeCommand: (id: string, params?: object) => unknown
+              }
+              cmdSvc.executeCommand('sheet.command.remove-row', {
+                range: { startRow, startColumn: 0, endRow, endColumn: COL_COUNT - 1 },
+              })
+            } catch {
+              return false
+            }
+            markDirty()
+            scheduleAutoSave()
+            return true
+          },
+        }
+        const isFullRowSelected = (): boolean => {
+          // 编辑态（焦点在 Univer 单元格编辑器内）→ 放行，仅删除字符
+          const ae = document.activeElement as HTMLElement | null
+          if (ae && (ae.isContentEditable || ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA')) return false
+          const ws = univerRef.current?.getActiveWorkbook()?.getActiveSheet()
+          if (!ws) return false
+          const ar = ws.getActiveRange()
+          if (!ar) return false
+          const startRow = ar.getRow()
+          const startCol = ar.getColumn()
+          const endCol = ar.getLastColumn()
+          return startRow >= 1 && startCol === 0 && endCol >= COL_COUNT - 1
+        }
+        if (deleteCmdSvc && shortcutSvc) {
+          rowDeleteDisposables.push(deleteCmdSvc.registerCommand(DeleteSelectedRowsCommand))
+          // 优先级高于 Univer 原生「清除选区内容」快捷键（默认 0）：整行选中时本快捷键先命中并消费该按键。
+          rowDeleteDisposables.push(
+            shortcutSvc.registerShortcut({
+              id: DeleteSelectedRowsCommand.id,
+              binding: KeyCode.DELETE,
+              priority: 100,
+              preconditions: () => isFullRowSelected(),
+            }),
+          )
+          rowDeleteDisposables.push(
+            shortcutSvc.registerShortcut({
+              id: DeleteSelectedRowsCommand.id,
+              binding: KeyCode.BACKSPACE,
+              priority: 100,
+              preconditions: () => isFullRowSelected(),
+            }),
+          )
+        }
         // 激活单元格落在数据末尾空行，便于继续录入 / 默认「填入」位置；
         // 并滚动到该行，同时多留末尾几行真实数据在视野内（END_VISIBLE_LEAD）
         const r = Math.max(1, Math.min(res.rows.length + 1, 100000))
@@ -540,6 +639,13 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
         /* noop */
       }
       acRef.current = null
+      for (const d of rowDeleteDisposables) {
+        try {
+          d.dispose()
+        } catch {
+          /* noop */
+        }
+      }
       try {
         univerAPI.dispose()
       } catch {

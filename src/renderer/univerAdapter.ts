@@ -16,7 +16,7 @@ export const BASE_COL_WIDTHS = [56, 110, 200, 56, 64, 72, 80, 72, 120]
 const SHEET_ID = 'bill'
 // 日期列（第 2 列，0 基索引 1）的样式 id。该列在 Univer 里按 yyyy-mm-dd 显示，
 // 与 Excel 中 numFmt='yyyy-mm-dd' 保持一致 —— 这样编辑器里看到的就是打开 Excel 后看到的，所见即所得。
-const DATE_STYLE = 'bill-date'
+export const DATE_STYLE = 'bill-date'
 // 表头样式 id：浅蓝底，让首行（表头）在滚动时更醒目（与冻结首行搭配使用）
 const HEADER_STYLE = 'bill-header'
 
