@@ -64,10 +64,12 @@ const SHEET_STRUCT_MUTATION_KEYWORDS = [
 // 略大于实际占位，宁可右侧留一点缝隙，也不让列总宽超过可视区导致出现横向滚动条。
 const COL_WIDTH_GUTTER = 64
 
-// 连续自动保存：任何改动（单元格编辑 / 删插行 / OCR 填入）后，延时 AUTOSAVE_DELAY 毫秒
-// （防抖，用户停顿后再写盘）自动整表存盘，无需手动保存或关闭文件。
-// 这样边录边存，输完一张即可继续下一张，且大幅降低意外丢失风险。
-const AUTOSAVE_DELAY = 1000
+// WPS 风格自动保存：停顿 AUTOSAVE_DELAY 毫秒后保存（比原 1s 更长，减少大文件存盘频率，
+// 避免每次按键停顿都触发一次整表存盘导致的卡顿）。
+const AUTOSAVE_DELAY = 5000
+// 周期性保存：即使持续编辑不暂停，也每隔 IDLE_SAVE_INTERVAL 检测并保存一次，
+// 作为"意外丢失"的安全网（WPS 默认约 10 分钟，此处取 2 分钟以兼顾安全与性能）。
+const IDLE_SAVE_INTERVAL = 120_000
 
 // 单元格输入记忆（自动补全）：编辑单元格时，根据「本列已有值 + 历史记录」给出提示，辅助快速输入。
 // 行为类似 Excel 的按列自动完成：你打字时，下方浮现本列曾出现过的、以及你以前输入过的相近内容。
@@ -162,6 +164,8 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
   const autoSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const savingRef = useRef(false)
   const pendingSaveRef = useRef(false)
+  // - autoSaveIntervalRef：周期性保存定时器（IDLE_SAVE_INTERVAL 间隔检测脏状态，触发一次防抖保存）
+  const autoSaveIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   // 单元格输入记忆（自动补全）相关状态：
   // - acRef：attachAutocomplete 返回的控制器实例（暴露 setIndex / accept 给鼠标交互，dispose 在卸载时调用）
   // - acUi：仅供渲染弹层的快照（open/items/index/定位 rect）；状态机在控制器内维护，避免打字时频繁重渲染
@@ -378,10 +382,14 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
   // 关闭文件：若有未保存修改，先自动保存（不弹确认框），保存成功后再关闭；
   // 若保存失败则保持面板打开，避免静默丢数据。
   const handleClose = async () => {
-    // 关闭前先取消待触发的自动保存定时器，避免卸载后再尝试写盘
+    // 关闭前先取消待触发的自动保存定时器与周期性保存定时器，避免卸载后再尝试写盘
     if (autoSaveTimerRef.current != null) {
       clearTimeout(autoSaveTimerRef.current)
       autoSaveTimerRef.current = null
+    }
+    if (autoSaveIntervalRef.current != null) {
+      clearInterval(autoSaveIntervalRef.current)
+      autoSaveIntervalRef.current = null
     }
     if (dirtyRef.current) {
       setStatus('正在自动保存…')
@@ -415,7 +423,23 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
     const { univer, univerAPI } = createUniver({
       locale: LocaleType.ZH_CN,
       locales: { [LocaleType.ZH_CN]: UniverPresetSheetsCoreZhCN },
-      presets: [UniverSheetsCorePreset({ container: containerRef.current })],
+      // 关键：禁用 Univer 的两个"文本格式数字"告警/标记——
+      //   1) disableForceStringAlert/Mark（sheets-ui）：当单元格为文本格式但值为数字时，
+      //      会弹出一个"以文本形式存储的数字"错误气泡（forceStringInfo），该气泡的 overlay 会阻断
+      //      交互约 1 分钟后自动消失，表现为"输入时报错然后卡死 1 分钟自行恢复"。
+      //   2) disableTextFormatAlert/Mark（sheets-numfmt）：同一机制在 numfmt 插件中也会触发，
+      //      并且其拦截器会强制把数字值改为 STRING 类型，导致"7.8 变成 80"之类的显示错乱。
+      // 本应用的数据格式由我们自己控制（数量/单价/金额存为数字、日期存为序列号），不存在"文本格式数字"
+      // 的语义需求，故禁用这两个告警既消除报错/卡死，也彻底杜绝数值被误改为字符串。
+      presets: [UniverSheetsCorePreset({
+        container: containerRef.current,
+        disableTextFormatAlert: true,
+        disableTextFormatMark: true,
+        sheets: {
+          disableForceStringAlert: true,
+          disableForceStringMark: true,
+        },
+      })],
     })
     univerRef.current = univerAPI
     univerInstRef.current = univer
@@ -442,6 +466,13 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
       })
     }
     window.addEventListener('resize', onResize)
+
+    // 周期性自动保存（WPS 风格）：每隔 IDLE_SAVE_INTERVAL 检测是否有未保存修改，有则触发一次防抖保存。
+    // 与"停顿后保存"互补：前者覆盖"持续编辑不暂停"的场景（作为意外丢失安全网），
+    // 后者覆盖"完成一行后短暂停顿"的场景。二者共用同一套防抖/并发保护，不会叠加写盘。
+    autoSaveIntervalRef.current = setInterval(() => {
+      if (dirtyRef.current) scheduleAutoSave()
+    }, IDLE_SAVE_INTERVAL)
 
     // 编辑即标记脏；数量/单价变化自动重算金额（自动金额行），
     // 金额列被编辑时按“是否==数量×单价”重分类该行（手工金额不被覆盖）。
@@ -519,10 +550,14 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
       disposed = true
       window.removeEventListener('resize', onResize)
       if (resizeRafRef.current != null) cancelAnimationFrame(resizeRafRef.current)
-      // 组件卸载时取消待触发的自动保存定时器
+      // 组件卸载时取消待触发的自动保存定时器与周期性保存定时器
       if (autoSaveTimerRef.current != null) {
         clearTimeout(autoSaveTimerRef.current)
         autoSaveTimerRef.current = null
+      }
+      if (autoSaveIntervalRef.current != null) {
+        clearInterval(autoSaveIntervalRef.current)
+        autoSaveIntervalRef.current = null
       }
       try {
         disp.dispose()
