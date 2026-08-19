@@ -17,7 +17,8 @@
 //      Univer 把编辑器内容写回单元格，走的是 _submitEdit → SetRangeValuesCommand。
 //      我们在该命令“执行前”拦截，把它的 value 替换为候选值（字符串/数字 + 正确 CellValueType）。
 //      于是落盘由 Univer 自己用 editCellState 的【正确 row】完成，既绕开 +1 偏移、也绕开 replaceText 时序。
-//      键盘 Enter/Tab 直接放行原生提交（拦截器换值）；鼠标点选则显式触发关闭+提交（同一拦截器换值）。
+//      键盘 Enter/Tab 直接放行原生提交（拦截器换值：Enter 仅当用户已用方向键主动选中过候选、Tab 始终回填）；
+//      鼠标点选则显式触发关闭+提交（同一拦截器换值）。
 //
 // 本模块与渲染框架无关：宿主（React 组件 / 测试页）通过 AcHost 回调提供
 //   computeItems（候选算法）、commit（仅记录历史，供后续候选）、render（渲染弹层）、container（坐标偏移）、univerAPI。
@@ -25,7 +26,7 @@ import { IEditorBridgeService, SetCellEditVisibleOperation } from '@univerjs/she
 import { IEditorService } from '@univerjs/docs-ui'
 import { ICommandService, CellValueType } from '@univerjs/core'
 import { SetRangeValuesCommand } from '@univerjs/sheets'
-import { COL_COUNT, type AcItem } from './autocomplete'
+import { COL_COUNT, DATE_COL_INDEX, type AcItem } from './autocomplete'
 
 export interface AcViewState {
   open: boolean
@@ -97,6 +98,10 @@ export function attachAutocomplete(univerInst: any, host: AcHost): AcController 
   let editorSub: { dispose: () => void } | null = null
   let items: AcItem[] = []
   let index = 0
+  // 用户是否已用方向键主动选择过候选项（Excel/WPS 语义）：
+  // 只有此时 Enter 才“写入高亮候选”；否则 Enter 一律提交用户自己输入的内容，
+  // 防止“输了 8.7、弹层开着、一按 Enter 就被换成上方最近的候选值”。
+  let navigated = false
   let pos: { left: number; top: number; width: number } | null = null
   // 是否正处于“接受候选、交还 Univer 原生提交”的过程中。
   // 置位期间忽略编辑器 input$ 回调，避免任何文本变化又把弹层重新打开。
@@ -178,6 +183,7 @@ export function attachAutocomplete(univerInst: any, host: AcHost): AcController 
   const closePopup = () => {
     items = []
     index = 0
+    navigated = false
     pos = null
     host.render({ open: false, items: [], index: 0, pos: null })
   }
@@ -207,6 +213,7 @@ export function attachAutocomplete(univerInst: any, host: AcHost): AcController 
     }
     items = next
     index = 0
+    navigated = false
     pos = findEditorRect() || { left: 120, top: 120, width: 120 }
     host.render({ open: true, items, index, pos })
   }
@@ -314,6 +321,10 @@ export function attachAutocomplete(univerInst: any, host: AcHost): AcController 
     // 仅 Enter(13)/Tab(9) 这类“提交并关闭”才注入候选；ESC(27) 或其它关闭不注入。
     if (kc !== 13 && kc !== 9) return
     if (!items.length) return
+    // Excel/WPS 语义：Enter 只有用方向键【主动选择过】候选时才回填高亮候选；
+    // 直接 Enter（未选过候选）提交的是用户自己输入的内容——防止“输入 8.7 被换成上方最近候选 170”。
+    // Tab 则始终回填高亮候选（与 Excel Tab 自动完成一致）。
+    if (kc === 13 && !navigated) return
     const idx = index >= 0 && index < items.length ? index : 0
     armAccept(items[idx])
   })
@@ -334,6 +345,11 @@ export function attachAutocomplete(univerInst: any, host: AcHost): AcController 
       ...prev,
       v: raw,
       t: isNum ? CellValueType.NUMBER : CellValueType.STRING,
+    }
+    // 日期列回填的是日期序列号（number）：显式补上 yyyy-mm-dd 显示格式，
+    // 否则单元格会按默认格式把 45866 显示成裸数字（列级默认样式对编辑提交写入的单元格不总是生效）。
+    if (acceptCol === DATE_COL_INDEX && isNum) {
+      cmd.params.value.s = { n: { pattern: 'yyyy-mm-dd' } }
     }
     // 记录历史，让自动补全后续能建议该值（acceptCol 而非 editCol：endEdit 可能已清零 editCol）。
     try { host.commit(item, acceptCol) } catch { /* noop */ }
@@ -379,18 +395,21 @@ export function attachAutocomplete(univerInst: any, host: AcHost): AcController 
       e.preventDefault()
       e.stopPropagation()
       index = (index + 1) % items.length
+      // 用户已主动用方向键选择候选 → 之后的 Enter 才回填高亮候选（Excel/WPS 语义）
+      navigated = true
       host.render({ open: true, items, index, pos })
     } else if (e.key === 'ArrowUp') {
       if (!items.length) return
       e.preventDefault()
       e.stopPropagation()
       index = (index - 1 + items.length) % items.length
+      navigated = true
       host.render({ open: true, items, index, pos })
     } else if (e.key === 'Enter' || e.key === 'Tab') {
       // 命中候选时不在此拦截：Univer 原生 Enter/Tab 会先发 set-cell-edit-visible 命令，
       // 由 beforeVisSub 在命令执行前把高亮候选记为待注入，再由 beforeSub 换值落盘。
       // 故此处直接放行（不 preventDefault），让原生提交走完；弹层由 endEdit 在命令结束后收起。
-      // （首条候选即 Excel/WPS“上方最近优先”的回填项；方向键已先行调整 index。）
+      // （Tab 始终回填高亮/首条候选，即 Excel/WPS“上方最近优先”；方向键已先行调整 index 并置 navigated。）
     } else if (e.key === 'Escape') {
       // 第一次 ESC 只关弹层、保留编辑（与 Excel/WPS 一致）；拦截默认，避免原生 ESC 取消整格编辑。
       // 弹层已关后 items 清空，下一轮 onKey 直接 early-return，原生 ESC 才会取消整格编辑。
