@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { createUniver, LocaleType } from '@univerjs/presets'
 import { UniverSheetsCorePreset } from '@univerjs/preset-sheets-core'
 import UniverPresetSheetsCoreZhCN from '@univerjs/preset-sheets-core/locales/zh-CN'
+import { IEditorBridgeService } from '@univerjs/sheets-ui'
 import '@univerjs/preset-sheets-core/lib/index.css'
 import type { ElectronAPI, FileEntry, AIRecognizedRow } from '../types'
 import {
@@ -64,12 +65,20 @@ const SHEET_STRUCT_MUTATION_KEYWORDS = [
 // 略大于实际占位，宁可右侧留一点缝隙，也不让列总宽超过可视区导致出现横向滚动条。
 const COL_WIDTH_GUTTER = 64
 
+// 多选区域按退格/Delete 应清空整个选区（Excel/WPS 语义）。
+// 根因：Univer 在"选择"模式下对 Backspace 有两条快捷键——ClearSelectionContentCommand（清选区）
+// 与 EditorDeleteLeftShortcutInActive（binding: BACKSPACE，进入左上角一格编辑）——后者在多选时优先匹配，
+// 导致用户按 Backspace 时只进入左上角一格编辑、而非清空整个选区。
+// 修复：在 window 捕获阶段拦截，当"未进入编辑"且"选区为多格"时，主动执行 sheet.command.clear-selection-content
+// 清空整个选区；单格选区（此时 Backspace 应进入编辑）与已处于编辑状态时，一律放行由 Univer 原生处理。
+const CLEAR_SELECTION_CMD_ID = 'sheet.command.clear-selection-content'
+
 // WPS 风格自动保存：停顿 AUTOSAVE_DELAY 毫秒后保存（比原 1s 更长，减少大文件存盘频率，
 // 避免每次按键停顿都触发一次整表存盘导致的卡顿）。
 const AUTOSAVE_DELAY = 5000
 // 周期性保存：即使持续编辑不暂停，也每隔 IDLE_SAVE_INTERVAL 检测并保存一次，
 // 作为"意外丢失"的安全网（WPS 默认约 10 分钟，此处取 2 分钟以兼顾安全与性能）。
-const IDLE_SAVE_INTERVAL = 120_000
+const IDLE_SAVE_INTERVAL = 600_000
 
 // 单元格输入记忆（自动补全）：编辑单元格时，根据「本列已有值 + 历史记录」给出提示，辅助快速输入。
 // 行为类似 Excel 的按列自动完成：你打字时，下方浮现本列曾出现过的、以及你以前输入过的相近内容。
@@ -166,6 +175,7 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
   const pendingSaveRef = useRef(false)
   // - autoSaveIntervalRef：周期性保存定时器（IDLE_SAVE_INTERVAL 间隔检测脏状态，触发一次防抖保存）
   const autoSaveIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const clearKeyListenerRef = useRef<() => void>(() => {})
   // 单元格输入记忆（自动补全）相关状态：
   // - acRef：attachAutocomplete 返回的控制器实例（暴露 setIndex / accept 给鼠标交互，dispose 在卸载时调用）
   // - acUi：仅供渲染弹层的快照（open/items/index/定位 rect）；状态机在控制器内维护，避免打字时频繁重渲染
@@ -391,6 +401,7 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
       clearInterval(autoSaveIntervalRef.current)
       autoSaveIntervalRef.current = null
     }
+    clearKeyListenerRef.current?.()
     if (dirtyRef.current) {
       setStatus('正在自动保存…')
       await handleSave()
@@ -473,6 +484,50 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
     autoSaveIntervalRef.current = setInterval(() => {
       if (dirtyRef.current) scheduleAutoSave()
     }, IDLE_SAVE_INTERVAL)
+
+    // 多选退格/Delete 修复：获取 editorBridge 以便拦截时判断"是否正在编辑"。
+    // （编辑器未激活 = 处于选择模式，此时退格应清空整个选区；编辑器已激活 = 退格应删除字符，放行。）
+    const editorBridge = (() => {
+      try {
+        return (univerInstRef.current as any).__getInjector?.()?.get?.(IEditorBridgeService)
+      } catch {
+        return null
+      }
+    })()
+
+    // window 捕获阶段拦截退格/Delete：多选 + 未编辑 → 清空整个选区；其余放行 Univer 原生处理。
+    const onClearKeyCapture = (e: KeyboardEvent) => {
+      const key = e.key
+      if (key !== 'Backspace' && key !== 'Delete') return
+      // 正在编辑单元格（编辑器可见）：放行，由 Univer 处理"退格删字符"
+      const vb = editorBridge?.visible$?.getValue?.()
+      if (vb?.visible) return
+      const ws = univerRef.current?.getActiveSheet()?.worksheet
+      if (!ws) return
+      const ar = ws.getActiveRange()
+      if (!ar) return
+      // FRange 的 getRange() 返回内部 Range（带 startRow/startColumn/endRow/endColumn）
+      const range = (ar as { getRange?: () => { startRow?: number; endRow?: number; startColumn?: number; endColumn?: number } }).getRange?.()
+      if (!range || (typeof range.startRow !== 'number' && typeof (range as any).startRow !== 'number')) return
+      const sr = (range as { startRow: number; startColumn: number; endRow: number; endColumn: number }).startRow
+      const er = (range as { startRow: number; startColumn: number; endRow: number; endColumn: number }).endRow
+      const sc = (range as { startRow: number; startColumn: number; endRow: number; endColumn: number }).startColumn
+      const ec = (range as { startRow: number; startColumn: number; endRow: number; endColumn: number }).endColumn
+      const isMulti = (er - sr) > 0 || (ec - sc) > 0
+      if (!isMulti) return
+      // 多选且未编辑：清空整个选区（Excel/WPS 语义）
+      e.preventDefault()
+      e.stopPropagation()
+      try {
+        const api = univerRef.current as unknown as { executeCommand: (id: string) => unknown }
+        void api.executeCommand(CLEAR_SELECTION_CMD_ID)
+      } catch {
+        /* noop */
+      }
+    }
+    window.addEventListener('keydown', onClearKeyCapture, true)
+    const onRemoveClearKeyCapture = () => window.removeEventListener('keydown', onClearKeyCapture, true)
+    clearKeyListenerRef.current = onRemoveClearKeyCapture
 
     // 编辑即标记脏；数量/单价变化自动重算金额（自动金额行），
     // 金额列被编辑时按“是否==数量×单价”重分类该行（手工金额不被覆盖）。
@@ -559,6 +614,7 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
         clearInterval(autoSaveIntervalRef.current)
         autoSaveIntervalRef.current = null
       }
+      clearKeyListenerRef.current?.()
       try {
         disp.dispose()
       } catch {
