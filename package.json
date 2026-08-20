@@ -57,6 +57,11 @@
       "dist/**/*",
       "dist-electron/**/*",
       "scripts/**/*",
+      "!scripts/ark_extract.mjs",
+      "!scripts/ark_token_compare.mjs",
+      "!scripts/token_compare_result.json",
+      "!scripts/stepfun_demo.mjs",
+      "!scripts/export_onnx.py",
       "models/**/*",
       "package.json"
     ],

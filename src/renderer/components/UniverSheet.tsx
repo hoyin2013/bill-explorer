@@ -238,6 +238,8 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
       while (rows.length && rows[rows.length - 1].every((c) => !String(c).trim())) rows.pop()
       const res = await api.saveSheet(fileRef.current.filePath, rows)
       if (res.error) {
+        // 保存失败：保持 dirty 状态，错误持久显示在状态栏（不会自动消失），
+        // 提示用户文件可能被 Excel 打开锁定（修复 U3）
         setStatus('保存失败：' + (res.message || '未知错误'))
       } else {
         dirtyRef.current = false
@@ -405,8 +407,11 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
     if (dirtyRef.current) {
       setStatus('正在自动保存…')
       await handleSave()
-      // 保存失败（dirty 仍为 true）时保持面板打开，让用户看到错误并重试
-      if (dirtyRef.current) return
+      // 保存失败（dirty 仍为 true）时保持面板打开，让用户看到错误并重试（修复 U4）
+      if (dirtyRef.current) {
+        setStatus('关闭前保存失败，请先解决保存问题后再关闭（文件可能被 Excel 打开锁定）。如有需要可点「关闭」前手动另存。')
+        return
+      }
     }
     onClose()
   }
@@ -469,11 +474,18 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
     })
 
     // 窗口尺寸变化（含最大化）时，列宽等比自适应铺满，不留右侧空白。
+    // RAF 节流 + 150ms 防抖：拖拽 resize 时 16ms/帧触发 RAF，但列宽只在 150ms 停顿后应用，
+    // 避免拖拽过程中每帧都触发 Univer 9 次 setColumnWidth + layout 重算（修复 P3）。
+    let resizeTimer: ReturnType<typeof setTimeout> | null = null
     const onResize = () => {
       if (resizeRafRef.current != null) cancelAnimationFrame(resizeRafRef.current)
       resizeRafRef.current = requestAnimationFrame(() => {
         resizeRafRef.current = null
-        applyProportionalColumnWidths()
+        if (resizeTimer != null) clearTimeout(resizeTimer)
+        resizeTimer = setTimeout(() => {
+          resizeTimer = null
+          applyProportionalColumnWidths()
+        }, 150)
       })
     }
     window.addEventListener('resize', onResize)

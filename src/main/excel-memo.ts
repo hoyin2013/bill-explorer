@@ -582,7 +582,7 @@ export async function loadSheet(filePath: string): Promise<SheetData> {
     rows.push(seen.get(r) ?? HEADER.map(() => ''))
   }
 
-  // 末尾“大量空行”裁剪：自底向上数连续空行，仅当其数量超过阈值时才删除，
+  // 末尾”大量空行”裁剪：自底向上数连续空行，仅当其数量超过阈值时才删除，
   // 以便光标定位到真正数据的末尾；数据区内部的空行（夹在两条有数据行之间）一律保留。
   let trailingEmpty = 0
   for (let i = rows.length - 1; i >= 0; i -= 1) {

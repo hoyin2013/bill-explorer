@@ -130,6 +130,7 @@ function rowsToTsv(rs: AIRecognizedRow[]): string {
 
 // 结果表列定义（已去掉调货人 / 备注：识别不准且无需记录；也不显示「序号」列，
 // 序号是自动编号、对录入无意义，打开识别结果时不再占用空间）
+// 注意：person 字段仅用于内部匹配 Excel 文件名快捷打开，不展示、不编辑、不回填
 const RESULT_COLS: Array<{ field: keyof AIRecognizedRow; label: string; w: string }> = [
   { field: 'date', label: '日期', w: '72px' },
   { field: 'name', label: '货品', w: '70px' },
@@ -138,7 +139,7 @@ const RESULT_COLS: Array<{ field: keyof AIRecognizedRow; label: string; w: strin
   { field: 'price', label: '单价', w: '50px' },
 ]
 
-// 各列默认宽度（px），可被用户拖动调节；去掉了金额列，日期/货品/单位/数量调窄一些
+// 各列默认宽度（px），可被用户拖动调节
 const COL_DEFAULTS: Record<string, number> = {
   date: 72,
   name: 70,
@@ -170,12 +171,21 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
   // 视图模式：总览（带检测框的原图）/ 单张（放大某张小票）
   const [viewMode, setViewMode] = useState<'overview' | 'single'>('overview')
   const [active, setActive] = useState(0) // 当前查看的 ticket 下标
+  // 持久 ref（供 useImperativeHandle 在 deps=[] 时读取最新状态，避免闭包过期导致拆分窗口状态丢失）
+  const rowsRef = useRef<AIRecognizedRow[]>([])
+  const boxesRef = useRef<DetectedBox[]>([])
+  const activeRef = useRef(0)
+  useEffect(() => { rowsRef.current = rows }, [rows])
+  useEffect(() => { boxesRef.current = boxes }, [boxes])
+  useEffect(() => { activeRef.current = active }, [active])
   const [singleRotate, setSingleRotate] = useState(0) // 单张视图内手动微调旋转
   const [copyMsg, setCopyMsg] = useState('')
   // 逐张识别的队列与状态（后台顺序识别，不阻塞前台操作）：
   // recogState[i] 标记每张小票的识别状态；bgRunning 表示后台队列正在跑。
   const [recogState, setRecogState] = useState<Record<number, 'pending' | 'busy' | 'done' | 'error'>>({})
   const [bgRunning, setBgRunning] = useState(false)
+  // 后台识别进度（已完成张数 / 总张数），供进度条展示（修复 U2）
+  const [bgProgress, setBgProgress] = useState<{ done: number; total: number } | null>(null)
   // tickets 的实时镜像（供异步队列读取最新裁剪图 / 已识别结果，避免闭包读到旧值）
   const ticketsRef = useRef<RecognizedTicket[]>([])
   // 后台识别队列管理器：queue=待处理下标，running=是否有循环在跑，cancelled=取消
@@ -193,6 +203,8 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
     runtimeReady: boolean
     detail: string
   } | null>(null)
+  // AI 配置是否已就绪（baseURL + apiKey + model 均有值），用于禁用识别按钮并提示用户（修复 U8）
+  const [aiConfigured, setAiConfigured] = useState(false)
   // 预览缩放 / 平移状态
   const [zoom, setZoom] = useState(1)
   const [pan, setPan] = useState<{ x: number; y: number }>({ x: 0, y: 0 })
@@ -250,12 +262,12 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
       selected,
       preview,
       rotate,
-      rows,
-      boxes,
+      rows: rowsRef.current,
+      boxes: boxesRef.current,
       imgNatural,
-      tickets,
+      tickets: ticketsRef.current,
       viewMode,
-      active,
+      active: activeRef.current,
       singleRotate,
       recogState,
       zoom,
@@ -300,7 +312,7 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
     setInstant(true)
   }
 
-  useImperativeHandle(ref, () => ({ captureState, restoreState }), [captureState, restoreState])
+  useImperativeHandle(ref, () => ({ captureState, restoreState }), [])
 
   // 独立窗口：启动时用主进程回传的快照恢复结果与进度。
   // 用 useLayoutEffect 在首帧绘制前完成恢复，避免「先空白再填充」的闪烁，
@@ -852,6 +864,15 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
       // 瞬间禁用过渡，避免「从旋转角回正」触发一段可见的旋转动画（画面闪一下）。
       setInstant(true)
       setRotate(0)
+      rotateRef.current = 0
+      // 持久化全局默认方向：检测时用户旋转到正向，应视为"新的默认方向"，
+      // 之后每张图片打开 / 检测都套用此方向，避免反复手动旋转（修复 B3）。
+      // 注意：rotate 仍是本渲染闭包中的原始值（setRotate 是异步的），此时判断正确。
+      const appliedRotation = rotate % 360
+      if (appliedRotation !== 0) {
+        defaultRotateRef.current = appliedRotation
+        api.setImageRotation(appliedRotation).catch(() => {})
+      }
       resetView()
       setTimeout(() => setInstant(false), 120)
       const res = await api.aiDetect({ imagePath: path, imageBase64: b64 })
@@ -921,26 +942,34 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
 
   // 后台顺序识别循环：一次只识别一张，逐个 await，期间不阻塞 UI；
   // 用户在队列跑动时仍可随意点击其它小票（会被重新插到队首优先识别）。
+  // 后台顺序识别循环：一次只识别一张，逐个 await，期间不阻塞 UI；
+  // 用户在队列跑动时仍可随意点击其它小票（会被重新插到队首优先识别）。
   async function drainRecognition() {
     const mgr = recogMgr.current
+    const total = mgr.queue.length
+    setBgProgress({ done: 0, total })
     let processed = 0
     while (mgr.queue.length > 0 && !mgr.cancelled) {
       const i = mgr.queue.shift()!
       const force = mgr.force.has(i)
       mgr.force.delete(i)
-      // 再次确认：若已被识别（例如用户刚手动识别过 / 已缓存），且非主动重新识别，直接跳过
       if ((ticketsRef.current[i]?.rows.length ?? 0) > 0 && !force) {
         setRecogState((p) => ({ ...p, [i]: 'done' }))
+        processed++
+        setBgProgress({ done: processed, total })
         continue
       }
-      setStatus(`正在后台识别第 ${i + 1} 张小票…（队列剩余 ${mgr.queue.length} 张）`)
+      const pct = total > 0 ? Math.round((processed / total) * 100) : 0
+      setStatus(`正在识别第 ${processed + 1}/${total} 张（${pct}%）…剩余 ${mgr.queue.length} 张`)
       await recognizeTicketByIdx(i, force)
       processed++
+      setBgProgress({ done: processed, total })
     }
     mgr.running = false
     setBgRunning(false)
+    setBgProgress(null)
     if (!mgr.cancelled && processed > 0) {
-      setStatus(`后台识别完成：本组共识别 ${processed} 张小票，结果已缓存，可直接录入`)
+      setStatus(`后台识别完成：共 ${processed} 张小票，结果已缓存，可直接录入`)
     }
   }
 
@@ -957,6 +986,7 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
   // 日期规则：仅「首张被识别」的小票贡献日期作为全局基准；之后所有小票的日期都套用
   // 该基准（不各自再识别日期），保证一整组小票使用同一日期。
   async function recognizeTicketByIdx(i: number, force = false) {
+    const mgr = recogMgr.current
     const t = ticketsRef.current[i]
     if (!t || !t.crop) {
       setRecogState((p) => ({ ...p, [i]: 'error' }))
@@ -966,6 +996,7 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
     setRecogState((p) => ({ ...p, [i]: 'busy' }))
     try {
       const res = await api.aiRecognizeCrop(t.crop, force)
+      if (mgr.cancelled) return
       if (res.error) {
         setStatus(res.message || `第 ${i + 1} 张识别失败`)
         setRecogState((p) => ({ ...p, [i]: 'error' }))
@@ -993,6 +1024,7 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
       setRecogState((p) => ({ ...p, [i]: 'done' }))
       if (res.cached) setStatus(`第 ${i + 1} 张：命中识别缓存，已跳过请求（如需重识别请点「重新识别此张」）`)
     } catch (err) {
+      if (mgr.cancelled) return
       setStatus('识别失败：' + (err instanceof Error ? err.message : '未知错误'))
       setRecogState((p) => ({ ...p, [i]: 'error' }))
     }
@@ -1089,12 +1121,18 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialState])
 
-  // 挂载时探测检测增强环境，提前告知用户是否可用（而非点「检测」后才报错）
+  // 挂载时探测检测增强环境 + AI 配置是否就绪，提前告知用户（而非点"检测/识别"后才报错）
   useEffect(() => {
-    api
-      .detectEnvironment()
-      .then(setDetectEnv)
-      .catch(() => setDetectEnv(null))
+    Promise.all([
+      api.detectEnvironment().catch(() => null),
+      api.getSettings().catch(() => null),
+    ]).then(([env, settings]) => {
+      setDetectEnv(env ?? null)
+      // AI 配置就绪条件：baseURL + apiKey + model 三者均有值
+      const cfg = settings?.aiConfig
+      const ok = !!(cfg && cfg.baseURL && cfg.apiKey && cfg.model)
+      setAiConfigured(ok)
+    })
   }, [api])
 
   // 是否展示"来源"列：仅当结果来自多张不同图片时（单图识别不显示，避免冗余）
@@ -1289,7 +1327,8 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
                         <button
                           className="btn btn-small btn-outline"
                           onClick={() => recognizeThisCrop(active)}
-                          disabled={singleBusy || !activeTicket.crop}
+                          disabled={singleBusy || !activeTicket.crop || !aiConfigured}
+                          title={!aiConfigured ? '请先在 AI 设置中配置 API Key' : undefined}
                         >
                           {singleBusy ? '识别中…' : '识别此张'}
                         </button>
@@ -1297,8 +1336,8 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
                         <button
                           className="btn btn-small btn-outline"
                           onClick={() => recognizeThisCrop(active)}
-                          disabled={singleBusy || !activeTicket.crop}
-                          title="重新调用模型 API 识别本张小票"
+                          disabled={singleBusy || !activeTicket.crop || !aiConfigured}
+                          title={!aiConfigured ? '请先在 AI 设置中配置 API Key' : '重新调用模型 API 识别本张小票'}
                         >
                           重新识别
                         </button>
@@ -1335,6 +1374,7 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
                             <tr key={ri}>
                               <td className="ai-col-del">
                                 <button className="ai-row-del" onClick={() => deleteTicketRow(active, ri)} title="删除该行">×</button>
+                                {r.personCorrected && <span className="person-fixed" title="客户名已按人名清单自动修正">已修正</span>}
                               </td>
                               {RESULT_COLS.map((c) => (
                                 <td key={String(c.field)}>
@@ -1343,9 +1383,6 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
                                     value={String(r[c.field] ?? '')}
                                     onChange={(e) => updateTicketCell(active, ri, c.field, e.target.value)}
                                   />
-                                  {c.field === 'person' && r.personCorrected && (
-                                    <span className="person-fixed" title="已按人名清单自动修正">已修正</span>
-                                  )}
                                 </td>
                               ))}
                             </tr>
@@ -1423,6 +1460,11 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
                         {boxes.map((b, i) => {
                           const sw = Math.max(2, imgNatural.w * 0.004)
                           const fs = Math.max(12, imgNatural.w * 0.022)
+                          // 标签位置：框在图片顶部时改为框内左上角，避免与画布边界/框线重叠（修复 U7）
+                          const labelAbove = b.y >= fs * 0.9
+                          const labelX = b.x + sw + 2
+                          const labelY = labelAbove ? Math.max(b.y - fs * 0.4, fs) : b.y + fs * 1.05
+                          const labelAnchor = labelAbove ? 'start' : 'start'
                           return (
                             <g key={i} className="ticket-box-rect" onClickCapture={() => openTicket(i)}>
                               <rect
@@ -1436,8 +1478,8 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
                                 style={{ pointerEvents: 'auto', cursor: 'pointer' }}
                               />
                               <text
-                                x={b.x}
-                                y={Math.max(b.y - fs * 0.4, fs)}
+                                x={labelX}
+                                y={labelY}
                                 fill="#fff"
                                 stroke="#409eff"
                                 strokeWidth={sw * 0.6}
@@ -1478,10 +1520,30 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
                   >
                     清除识别缓存
                   </button>
-                  {bgRunning && (
+                  {bgRunning && bgProgress && (
                     <div className="bg-indicator" title="正在后台顺序识别各张小票，不阻塞前台；可取消">
                       <span className="bg-spinner" />
-                      <span>后台识别中…</span>
+                      <span>识别 {bgProgress.done}/{bgProgress.total} 张（{Math.round(bgProgress.done / bgProgress.total * 100)}%）</span>
+                      <div
+                        className="bg-progress-bar"
+                        style={{
+                          flex: 1,
+                          height: 6,
+                          borderRadius: 3,
+                          background: '#ecf5ff',
+                          overflow: 'hidden',
+                          margin: '0 4px',
+                        }}
+                      >
+                        <div
+                          style={{
+                            width: `${(bgProgress.done / bgProgress.total) * 100}%`,
+                            height: '100%',
+                            background: '#409eff',
+                            transition: 'width 0.3s',
+                          }}
+                        />
+                      </div>
                       <button className="btn btn-small btn-link" onClick={cancelRecognition}>
                         取消
                       </button>
@@ -1592,6 +1654,7 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
                               <tr key={i}>
                                 <td className="ai-col-del">
                                   <button className="ai-row-del" onClick={() => deleteRow(i)} title="删除该行">×</button>
+                                  {r.personCorrected && <span className="person-fixed" title="客户名已按人名清单自动修正">已修正</span>}
                                 </td>
                                 {RESULT_COLS.map((c) => (
                                   <td key={String(c.field)}>
@@ -1600,9 +1663,6 @@ export const ImageWindow = forwardRef<ImageWindowHandle, Props>(function ImageWi
                                       value={String(r[c.field] ?? '')}
                                       onChange={(e) => updateCell(i, c.field, e.target.value)}
                                     />
-                                    {c.field === 'person' && r.personCorrected && (
-                                      <span className="person-fixed" title="已按人名清单自动修正">已修正</span>
-                                    )}
                                   </td>
                                 ))}
                                 {showSource && <td className="ai-source" title={r.source}>{r.source}</td>}

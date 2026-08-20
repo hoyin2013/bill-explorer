@@ -221,7 +221,15 @@ export function ResultList({
   }
 
   if (!files.length && query.trim()) {
-    return <div className="empty-state">无匹配结果</div>
+    return (
+      <div className="empty-state">
+        <span>无匹配结果</span>
+        <br />
+        <span style={{ fontSize: 11, color: '#c0c4cc', marginTop: 6, display: 'block' }}>
+          已尝试 文件名 / 路径 / 全拼 / 拼音首字母 匹配，仍未找到
+        </span>
+      </div>
+    )
   }
 
   return (
