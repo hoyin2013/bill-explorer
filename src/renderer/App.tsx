@@ -137,6 +137,9 @@ function AppInner({ api }: { api: ElectronAPI }) {
   // 记录最近一次保存的文件路径（用于"同一文件连续编辑 → 覆盖更新"）
   const lastSavedFile = useRef<string | null>(null)
 
+  // 切换文件前：等待 UniverSheet 完成保存（若有未保存修改）
+  const sheetSaveBeforeSwitchRef = useRef<() => Promise<unknown>>(async () => {})
+
   // 每次窗口激活（从后台 / Dock 切回来）都把光标定位到搜索框，方便直接打字
   useEffect(() => {
     const onFocus = () => {
@@ -281,9 +284,19 @@ function AppInner({ api }: { api: ElectronAPI }) {
   }
 
   // ---- 单击条目：在应用内打开录入面板 ----
+  // 若有未保存修改，先保存当前文件再打开下一个，避免静默丢数据（修复 U5）
   function onOpen(index: number) {
     const file = filtered[index]
     if (!file) return
+    const prev = activeFileRef.current
+    if (prev && file.filePath !== prev.filePath) {
+      // 等 UniverSheet 保存完当前文件，再切换 key → 销毁旧实例（不等则旧 sheet 卸载时数据丢失）
+      sheetSaveBeforeSwitchRef.current().then(() => {
+        setActiveFile(file)
+        setMemoStatus('')
+      })
+      return
+    }
     setActiveFile(file)
     setMemoStatus('')
   }
@@ -314,9 +327,14 @@ function AppInner({ api }: { api: ElectronAPI }) {
   }
 
   // ---- 点击历史记录：若在当前扫描结果中则打开录入，否则用系统程序打开 ----
+  // 若有未保存修改，先保存再打开，避免静默丢数据（修复 U5）
   async function onHistorySelect(filePath: string) {
     const file = files.find((f) => f.filePath === filePath)
     if (file) {
+      const prev = activeFileRef.current
+      if (prev && filePath !== prev.filePath) {
+        await sheetSaveBeforeSwitchRef.current()
+      }
       setActiveFile(file)
       setMemoStatus('')
     } else {
@@ -511,6 +529,7 @@ function AppInner({ api }: { api: ElectronAPI }) {
                 setQuery('')      // 保存后清空左侧搜索框，回到全部文件视图
                 refreshHistory()
               }}
+              onRegisterSwitchFile={(fn) => { sheetSaveBeforeSwitchRef.current = fn }}
             />
           ) : (
             <div className="idle-hint">

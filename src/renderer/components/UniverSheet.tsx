@@ -31,6 +31,8 @@ interface Props {
   api: ElectronAPI
   onClose: () => void
   onSaved: () => void
+  /** 组件挂载时回调父组件，传入 switchFile 供切换前 await */
+  onRegisterSwitchFile?: (fn: () => Promise<boolean>) => void
 }
 
 // 设置激活单元格，并按需确保视图滚动到该单元格。
@@ -148,7 +150,7 @@ function setActiveAndScroll(
 // `autoAmountRows` 记录哪些行是“自动金额行”，加载文件 / OCR 填入时初始化，
 // 编辑金额列时被重分类（手填≠乘积 → 移出集合；填成==乘积 → 重新纳入）。
 
-export function UniverSheet({ file, api, onClose, onSaved }: Props) {
+export function UniverSheet({ file, api, onClose, onSaved, onRegisterSwitchFile }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const univerRef = useRef<UniverAPI | null>(null)
   // createUniver 同时返回 Univer 实例；自动补全控制器经其注入器取出官方编辑服务（见 acController.ts）。
@@ -391,6 +393,23 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
     pushHistory(col, raw != null ? String(raw) : display)
   }
 
+  // 切换文件前：若有未保存修改，先等保存完成再放行（避免静默丢数据）
+  // App.tsx 通过 sheetSaveBeforeSwitchRef 持有此函数，在 onOpen 里 await
+  const switchFile = async (): Promise<boolean> => {
+    if (autoSaveTimerRef.current != null) {
+      clearTimeout(autoSaveTimerRef.current)
+      autoSaveTimerRef.current = null
+    }
+    if (!dirtyRef.current) return true
+    await handleSave()
+    return !dirtyRef.current
+  }
+
+  // 组件挂载后把 switchFile 暴露给父组件（供切换文件前 await）
+  useEffect(() => {
+    onRegisterSwitchFile?.(switchFile)
+  }, [onRegisterSwitchFile])
+
   // 关闭文件：若有未保存修改，先自动保存（不弹确认框），保存成功后再关闭；
   // 若保存失败则保持面板打开，避免静默丢数据。
   const handleClose = async () => {
@@ -404,14 +423,11 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
       autoSaveIntervalRef.current = null
     }
     clearKeyListenerRef.current?.()
-    if (dirtyRef.current) {
-      setStatus('正在自动保存…')
-      await handleSave()
-      // 保存失败（dirty 仍为 true）时保持面板打开，让用户看到错误并重试（修复 U4）
-      if (dirtyRef.current) {
-        setStatus('关闭前保存失败，请先解决保存问题后再关闭（文件可能被 Excel 打开锁定）。如有需要可点「关闭」前手动另存。')
-        return
-      }
+    // 复用 switchFile 逻辑：有改动就保存，保存失败则保持面板打开
+    const ok = await switchFile()
+    if (!ok) {
+      setStatus('关闭前保存失败，请先解决保存问题后再关闭（文件可能被 Excel 打开锁定）。如有需要可点「关闭」前手动另存。')
+      return
     }
     onClose()
   }
@@ -627,6 +643,8 @@ export function UniverSheet({ file, api, onClose, onSaved }: Props) {
         autoSaveIntervalRef.current = null
       }
       clearKeyListenerRef.current?.()
+      // 卸载时若还有未保存修改，尝试保存（安全网；不阻塞卸载）
+      if (dirtyRef.current) void handleSave()
       try {
         disp.dispose()
       } catch {
